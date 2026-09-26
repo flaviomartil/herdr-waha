@@ -75,6 +75,17 @@ class Bridge:
         self.state_path = Path(state_path)
         self.channels_path = Path(os.environ.get("HERDR_WA_CHANNELS", str(Path.home() / ".config/herdr-waha/agent_channels.json")))
         self.sync_channels = os.environ.get("HERDR_WA_SYNC_CHANNELS", "1") in ("1", "true", "yes", "on")
+        raw_lines = str(os.environ.get("HERDR_WA_TERMINAL_LINES", "100")).strip().lower()
+        if raw_lines in ("0", "all", "full", "tudo", "max"):
+            self.terminal_lines = 1500
+        else:
+            try:
+                self.terminal_lines = max(10, int(raw_lines))
+            except ValueError:
+                self.terminal_lines = 100
+        self.stream_terminal = os.environ.get("HERDR_WA_STREAM_TERMINAL", "0") in ("1", "true", "yes", "on")
+        self.community_id = os.environ.get("HERDR_WA_COMMUNITY_ID", "120363427816264803@g.us")
+        self.announce_chat = os.environ.get("HERDR_WA_COMMUNITY_ANNOUNCE", "120363433204257170@g.us")
 
         self.lock = threading.RLock()
         self.seen = set(self.state_path.read_text().splitlines()) if self.state_path.exists() else set()
@@ -89,6 +100,38 @@ class Bridge:
                 self.channels = json.loads(self.channels_path.read_text())
             except Exception:
                 self.channels = {}
+
+    def read_terminal(self, pane_id, lines=None):
+        n = lines if lines is not None else self.terminal_lines
+        try:
+            return herdr("agent", "read", pane_id, "--lines", str(n), "--source", "recent")
+        except Exception as exc:
+            return f"Erro ao ler terminal: {exc}"
+
+    def sync_to_zapforge(self, group_id, label, role, text, metadata=None):
+        try:
+            payload = json.dumps({
+                "session": self.session,
+                "groupId": group_id,
+                "label": label,
+                "role": role,
+                "text": text[:25000],
+                "metadata": metadata or {},
+            }).encode()
+            req = urllib.request.Request(
+                self.base_url + "/api/herdr/sync-message",
+                data=payload,
+                headers={
+                    "X-Api-Key": self.api_key,
+                    "Content-Type": "application/json",
+                    "User-Agent": "ZapForge-Herdr-Bridge/1.0",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                pass
+        except Exception as exc:
+            pass
 
     def save_channels(self):
         try:
@@ -279,10 +322,27 @@ class Bridge:
             print(f"direct channel input for {pane_id} ({ch.get('label')}): '{body_text}'", flush=True)
 
             lower = body_text.lower()
-            if lower == "/screen":
+            if lower.startswith("/screen"):
+                lines = self.terminal_lines
+                parts = body_text.split()
+                if len(parts) > 1:
+                    if parts[1].lower() in ("full", "all", "tudo", "0", "max"):
+                        lines = 1500
+                    elif parts[1].isdigit():
+                        lines = min(2000, max(10, int(parts[1])))
                 try:
-                    screen = herdr("agent", "read", pane_id, "--lines", "60", "--source", "recent")
-                    self.send(f"🖥️ *Terminal Recente ({ch.get('label')}):*\n\n```\n{screen[-3000:]}\n```", target_chat=incoming_chat)
+                    screen = self.read_terminal(pane_id, lines=lines)
+                    clean_screen = screen.strip()
+                    self.sync_to_zapforge(incoming_chat, ch.get("label"), "assistant", f"🖥️ Terminal ({lines} linhas):\n\n```\n{clean_screen}\n```", metadata={"terminal": True, "lines": lines})
+
+                    if len(clean_screen) > 3400:
+                        wa_screen = clean_screen[-3200:]
+                        notice = f"\n\n_💡 Exibindo as últimas linhas ({len(wa_screen)} de {len(clean_screen)} caracteres). Histórico completo salvo no ZapForge._"
+                    else:
+                        wa_screen = clean_screen
+                        notice = ""
+                    screen_text = f"🖥️ *Terminal ({ch.get('label')} - {lines} linhas):*\n\n```\n{wa_screen}\n```" + notice
+                    self.send(screen_text, target_chat=incoming_chat)
                 except Exception as exc:
                     self.send(f"Erro ao ler terminal: {exc}", target_chat=incoming_chat)
                 return
@@ -291,7 +351,9 @@ class Bridge:
                 keys = body_text.split()[1:]
                 try:
                     herdr("agent", "send-keys", pane_id, *keys)
-                    self.send(f"⌨️ Tecla(s) enviada(s): `{' '.join(keys)}`", target_chat=incoming_chat)
+                    keys_msg = f"⌨️ Tecla(s) enviada(s): `{' '.join(keys)}`"
+                    self.send(keys_msg, target_chat=incoming_chat)
+                    self.sync_to_zapforge(incoming_chat, ch.get("label"), "operator", body_text)
                 except Exception as exc:
                     self.send(f"Erro ao enviar teclas: {exc}", target_chat=incoming_chat)
                 return
@@ -307,7 +369,9 @@ class Bridge:
                 key_to_send = short_keys.get(lower, body_text)
                 try:
                     herdr("agent", "send-keys", pane_id, key_to_send)
-                    self.send(f"⌨️ Tecla `{key_to_send}` enviada.", target_chat=incoming_chat)
+                    key_msg = f"⌨️ Tecla `{key_to_send}` enviada."
+                    self.send(key_msg, target_chat=incoming_chat)
+                    self.sync_to_zapforge(incoming_chat, ch.get("label"), "operator", body_text)
                 except Exception as exc:
                     self.send(f"Erro ao enviar tecla: {exc}", target_chat=incoming_chat)
                 return
@@ -316,6 +380,7 @@ class Bridge:
             try:
                 herdr("agent", "prompt", pane_id, body_text)
                 self.send(f"📨 Prompt enviado para `{ch.get('label')}`.", target_chat=incoming_chat)
+                self.sync_to_zapforge(incoming_chat, ch.get("label"), "operator", body_text)
             except Exception as exc:
                 self.send(f"Erro ao enviar prompt: {exc}", target_chat=incoming_chat)
             return
@@ -391,9 +456,22 @@ class Bridge:
                             f"💬 *Como usar:*\n"
                             f"• Digite qualquer mensagem neste grupo para enviar diretamente como prompt.\n"
                             f"• Se o agente estiver aguardando aprovação (❓), responda com `y`, `n`, `1`, `2` ou sua resposta.\n"
-                            f"• Use `/screen` para ver o terminal recente a qualquer momento."
+                            f"• Use `/screen` (ou `/screen full`) para ver o terminal recente a qualquer momento."
                         )
                         self.send(welcome_text, target_chat=group_id)
+                        self.sync_to_zapforge(group_id, lbl, "assistant", welcome_text)
+
+                        if self.announce_chat and self.announce_chat != group_id:
+                            ann_text = (
+                                f"📢 *Novo Agente no Swarm!*\n\n"
+                                f"Canal: *{target_subject}*\n"
+                                f"📁 `{agent.get('cwd', '')}` · `{agent.get('agent', '')}`\n"
+                                f"_Interaja diretamente no canal do agente._"
+                            )
+                            try:
+                                self.send(ann_text, target_chat=self.announce_chat)
+                            except Exception as ann_err:
+                                print(f"failed to send announcement for {lbl}: {ann_err}", flush=True)
                 except Exception as exc:
                     print(f"failed to create channel for {lbl}: {exc}", flush=True)
                     continue
@@ -412,28 +490,34 @@ class Bridge:
 
                     if st == "blocked":
                         try:
-                            screen = herdr("agent", "read", pane_id, "--lines", "25", "--source", "recent")
+                            screen = self.read_terminal(pane_id)
                             blocked_msg = (
                                 f"❓ *Aguardando resposta do operador!*\n\n"
                                 f"```\n{screen[-2500:]}\n```\n\n"
                                 f"_💡 Digite diretamente aqui sua resposta (ex: y, n, 1, 2, ou um texto)._"
                             )
                             self.send(blocked_msg, target_chat=group_id)
-                            if self.last_chat_id and self.last_chat_id != group_id:
+                            self.sync_to_zapforge(group_id, lbl, "assistant", blocked_msg)
+                            if self.announce_chat and self.announce_chat != group_id:
+                                self.send(f"⚠️ *Agente bloqueado (❓)*: {lbl}\nAcesse o canal do agente para responder.", target_chat=self.announce_chat)
+                            elif self.last_chat_id and self.last_chat_id != group_id:
                                 self.send(f"⚠️ *Agente bloqueado (❓)*: {lbl}\nAcesse o canal do agente para responder.", target_chat=self.last_chat_id)
                         except Exception as exc:
                             print(f"failed to send blocked alert for {pane_id}: {exc}", flush=True)
 
                     elif st == "done":
                         try:
-                            screen = herdr("agent", "read", pane_id, "--lines", "25", "--source", "recent")
+                            screen = self.read_terminal(pane_id)
                             done_msg = (
                                 f"🏆 *Tarefa Concluída!*\n\n"
                                 f"```\n{screen[-2500:]}\n```\n\n"
                                 f"_Pronto para o próximo prompt._"
                             )
                             self.send(done_msg, target_chat=group_id)
-                            if self.last_chat_id and self.last_chat_id != group_id:
+                            self.sync_to_zapforge(group_id, lbl, "assistant", done_msg)
+                            if self.announce_chat and self.announce_chat != group_id:
+                                self.send(f"🏆 *Tarefa concluída*: {lbl}", target_chat=self.announce_chat)
+                            elif self.last_chat_id and self.last_chat_id != group_id:
                                 self.send(f"🏆 *Tarefa concluída*: {lbl}", target_chat=self.last_chat_id)
                         except Exception as exc:
                             print(f"failed to send done alert for {pane_id}: {exc}", flush=True)
