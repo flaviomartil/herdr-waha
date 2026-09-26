@@ -154,16 +154,27 @@ class Bridge:
         payload = event.get("payload") or {}
         incoming_chat = payload.get("chatId") or payload.get("from") or ""
         incoming_from = payload.get("participant") or payload.get("from") or ""
-        if (event.get("event") != "message" or event.get("session") != self.session
+        meta = event.get("metadata") or {}
+        session_matches = (
+            event.get("session") == self.session
+            or same_phone(self.session, event.get("session"))
+            or meta.get("instanceId") == self.session
+            or meta.get("instanceName") == self.session
+            or meta.get("phone") == self.session
+            or same_phone(self.session, meta.get("phone"))
+        )
+        if (event.get("event") != "message" or not session_matches
                 or not payload.get("id")
                 or not isinstance(payload.get("body"), str) or not payload["body"].strip()):
             return
 
         sender_matches = same_phone(self.operator_id, incoming_from)
         if not sender_matches:
+            print(f"ignored: sender {incoming_from} does not match operator {self.operator_id}", flush=True)
             return
 
         if self.allowed_chat and not (incoming_chat == self.allowed_chat or same_phone(self.allowed_chat, incoming_chat)):
+            print(f"ignored: chat {incoming_chat} does not match allowed chat {self.allowed_chat}", flush=True)
             return
 
         body_text = payload["body"].strip()
@@ -186,11 +197,13 @@ class Bridge:
             self.seen.add(message_id)
             self.started = True
             self.last_chat_id = incoming_chat
+        print(f"executing command: '{body_text}' from {incoming_from} in {incoming_chat}", flush=True)
         try:
             answer, agent_key = self.command(body_text, reply_id, chat_id=incoming_chat)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, KeyError, OSError, ValueError) as exc:
             answer, agent_key = f"Herdr command failed: {type(exc).__name__}", None
-        self.send(answer, agent_key, target_chat=incoming_chat)
+        sent_id = self.send(answer, agent_key, target_chat=incoming_chat)
+        print(f"response sent to {incoming_chat} (msgId: {sent_id})", flush=True)
 
     def poll(self):
         while True:
