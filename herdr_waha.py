@@ -28,10 +28,33 @@ def label(agent):
     return f'{Path(agent.get("cwd") or "unknown").name} · {agent.get("agent") or "agent"}'
 
 
+def same_phone(configured_id, incoming_id):
+    if not configured_id or not incoming_id:
+        return False
+    if configured_id == incoming_id:
+        return True
+    c = str(configured_id).split("@")[0].strip()
+    i = str(incoming_id).split("@")[0].strip()
+    if c == i:
+        return True
+    if c.startswith("55") and i.startswith("55") and len(c) >= 4 and len(i) >= 4:
+        if c[2:4] == i[2:4]:
+            rest_c = c[4:]
+            rest_i = i[4:]
+            if len(rest_c) == 9 and len(rest_i) == 8 and rest_c[1:] == rest_i:
+                return True
+            if len(rest_c) == 8 and len(rest_i) == 9 and rest_i[1:] == rest_c:
+                return True
+    return False
+
+
 class Bridge:
     def __init__(self, base_url, api_key, session, hook_key, operator_id, state_path):
-        if not base_url.startswith(("http://", "https://")) or not operator_id.endswith("@c.us"):
-            raise ValueError("WAHA_URL must be HTTP(S) and WHATSAPP_OPERATOR_ID must end in @c.us")
+        operator_id = operator_id.strip()
+        if not operator_id.endswith("@c.us"):
+            operator_id = f"{operator_id}@c.us"
+        if not base_url.startswith(("http://", "https://")):
+            raise ValueError("WAHA_URL must be HTTP(S)")
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.session = session
@@ -46,9 +69,10 @@ class Bridge:
         self.started = False
 
     def verified(self, body, headers):
-        if headers.get("X-Webhook-Hmac-Algorithm") != "sha512":
+        algo = headers.get("X-Webhook-Hmac-Algorithm") or headers.get("x-webhook-hmac-algorithm")
+        if algo != "sha512":
             return False
-        actual = headers.get("X-Webhook-Hmac", "")
+        actual = headers.get("X-Webhook-Hmac") or headers.get("x-webhook-hmac", "")
         expected = hmac.new(self.hook_key, body, hashlib.sha512).hexdigest()
         return hmac.compare_digest(actual, expected)
 
@@ -115,9 +139,13 @@ class Bridge:
 
     def handle(self, event):
         payload = event.get("payload") or {}
+        incoming_from = payload.get("from") or ""
+        incoming_chat = payload.get("chatId") or ""
         if (event.get("event") != "message" or event.get("session") != self.session
-                or payload.get("fromMe") or payload.get("chatId") != self.operator_id
-                or payload.get("from") != self.operator_id or not payload.get("id")
+                or payload.get("fromMe")
+                or not same_phone(self.operator_id, incoming_chat)
+                or not same_phone(self.operator_id, incoming_from)
+                or not payload.get("id")
                 or not isinstance(payload.get("body"), str) or not payload["body"].strip()):
             return
         message_id = payload["id"]

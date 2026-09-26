@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Herdr WAHA & ZapForge Architecture",
+    "output": "architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "full-loop",
+        "label": "Full Command & Control Loop",
+        "focus": ["operator", "zf-webhook", "bridge-server", "herdr-cli", "tmux-panes", "zf-api"],
+        "note": "Operator issues WhatsApp command, ZapForge verifies and signs with HMAC, bridge executes via Herdr CLI."
+      },
+      {
+        "id": "inbound-dispatch",
+        "label": "Inbound Verification & Execution",
+        "focus": ["operator", "zf-webhook", "bridge-server", "state-store", "herdr-cli"],
+        "note": "HMAC-SHA512 verification, sender whitelisting, and idempotent state persistence."
+      },
+      {
+        "id": "status-feedback",
+        "label": "Status Polling & Notifications",
+        "focus": ["tmux-panes", "bridge-poller", "zf-api", "operator"],
+        "note": "Automated background poller reporting blocked or done states back to the operator."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "WhatsApp Operator",
+      "sublabel": "Whitelisted private chat",
+      "brand": "whatsapp",
+      "pos": [40, 320],
+      "size": [150, 70],
+      "tag": "E.164 Operator"
+    },
+    {
+      "id": "zf-webhook",
+      "type": "cloud",
+      "label": "ZapForge Inbound",
+      "sublabel": "Event Filter & Dispatcher",
+      "pos": [280, 160],
+      "size": [170, 70],
+      "tag": "HMAC-SHA512 Signer"
+    },
+    {
+      "id": "zf-api",
+      "type": "cloud",
+      "label": "ZapForge WAHA API",
+      "sublabel": "POST /api/sendText",
+      "pos": [280, 480],
+      "size": [170, 70],
+      "tag": "X-Api-Key Auth"
+    },
+    {
+      "id": "bridge-server",
+      "type": "backend",
+      "label": "Herdr WAHA Server",
+      "sublabel": "POST /webhook/waha :8080",
+      "brand": "python",
+      "pos": [570, 160],
+      "size": [180, 70],
+      "tag": "HTTP Bridge"
+    },
+    {
+      "id": "state-store",
+      "type": "database",
+      "label": "Seen Message Store",
+      "sublabel": "~/.config/herdr-waha/seen",
+      "pos": [570, 320],
+      "size": [180, 60],
+      "tag": "Deduplication"
+    },
+    {
+      "id": "bridge-poller",
+      "type": "backend",
+      "label": "State Poller",
+      "sublabel": "15s Interval Daemon",
+      "brand": "python",
+      "pos": [570, 480],
+      "size": [180, 70],
+      "tag": "State Monitor"
+    },
+    {
+      "id": "herdr-cli",
+      "type": "backend",
+      "label": "Herdr CLI",
+      "sublabel": "subprocess.run(herdr)",
+      "pos": [870, 160],
+      "size": [160, 70],
+      "tag": "Core Agent CLI"
+    },
+    {
+      "id": "tmux-panes",
+      "type": "frontend",
+      "label": "Tmux Agent Panes",
+      "sublabel": "Autonomous AI Terminals",
+      "pos": [870, 320],
+      "size": [160, 70],
+      "tag": "Live Agent Terminals"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "ZapForge / WAHA Infrastructure",
+      "wraps": ["zf-webhook", "zf-api"]
+    },
+    {
+      "kind": "security-group",
+      "label": "Local Host / Protected Execution Environment",
+      "wraps": ["bridge-server", "state-store", "bridge-poller", "herdr-cli", "tmux-panes"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "op-to-zf",
+      "from": "operator",
+      "to": "zf-webhook",
+      "label": "Command",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "zf-to-bridge",
+      "from": "zf-webhook",
+      "to": "bridge-server",
+      "label": "HMAC Webhook",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": -18
+    },
+    {
+      "id": "bridge-to-state",
+      "from": "bridge-server",
+      "to": "state-store",
+      "label": "dedup seen ID",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDx": 52,
+      "labelDy": 30
+    },
+    {
+      "id": "bridge-to-cli",
+      "from": "bridge-server",
+      "to": "herdr-cli",
+      "label": "run herdr",
+      "variant": "default",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": -18
+    },
+    {
+      "id": "cli-to-tmux",
+      "from": "herdr-cli",
+      "to": "tmux-panes",
+      "label": "agent prompt",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDx": 50,
+      "labelDy": 30
+    },
+    {
+      "id": "tmux-to-poller",
+      "from": "tmux-panes",
+      "to": "bridge-poller",
+      "label": "poll states",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "right"
+    },
+    {
+      "id": "poller-to-zfapi",
+      "from": "bridge-poller",
+      "to": "zf-api",
+      "label": "sendText alert",
+      "variant": "default",
+      "fromSide": "left",
+      "toSide": "right",
+      "labelDy": -18
+    },
+    {
+      "id": "zfapi-to-op",
+      "from": "zf-api",
+      "to": "operator",
+      "label": "WhatsApp reply",
+      "variant": "emphasis",
+      "fromSide": "left",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "WhatsApp Operator Security",
+      "items": [
+        "Strict E.164 phone whitelisting with Brazilian 9th-digit variation tolerance",
+        "Groups, channels, and unapproved senders are rejected before processing",
+        "Two-way HMAC-SHA512 cryptographic verification of webhook payloads"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "ZapForge WAHA Engine",
+      "items": [
+        "Native WAHA-compatible outbound API (`POST /api/sendText`) with X-Api-Key",
+        "Suppresses conflicting automated bots (Typebot/LLM) when operator messages",
+        "Automatic signing and delivery to user-defined Herdr endpoint"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Local Herdr Execution",
+      "items": [
+        "Inspect and read terminal screens (`/screen N`) without SSH access",
+        "Send inputs and prompt instructions directly to active agent panes (`/send N`)",
+        "Send interactive key presses (`/keys N`) to resolve blocking dialogs"
+      ]
+    }
+  ]
+}

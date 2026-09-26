@@ -44,6 +44,13 @@ class BridgeTest(unittest.TestCase):
             self.bridge.handle(event)
             send.assert_called_once()
 
+    def test_brazilian_phone_ninth_digit_tolerance(self):
+        self.assertTrue(herdr_waha.same_phone("5511999998888@c.us", "551199998888@c.us"))
+        self.assertTrue(herdr_waha.same_phone("551199998888@c.us", "5511999998888@c.us"))
+        self.assertTrue(herdr_waha.same_phone("5511999998888", "5511999998888@c.us"))
+        self.assertFalse(herdr_waha.same_phone("5511999998888@c.us", "5521999998888@c.us"))
+        self.assertFalse(herdr_waha.same_phone("5511999998888@c.us", "5511888887777@c.us"))
+
     def test_routing_rejects_reused_pane(self):
         with patch("herdr_waha.agents", return_value=[self.agent]), patch("herdr_waha.herdr", return_value="screen") as call:
             self.bridge.command("/agents")
