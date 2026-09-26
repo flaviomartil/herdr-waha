@@ -102,7 +102,7 @@ class Bridge:
                     self.replies[message_id] = agent_key
         return message_id
 
-    def command(self, text, reply_id=""):
+    def command(self, text, reply_id="", chat_id=""):
         parts = text.strip().split()
         if not parts:
             return "Commands: /agents, /status, /screen N, /send N text, /keys N key", None
@@ -114,7 +114,10 @@ class Bridge:
             if not current:
                 return "No active agents.", None
             lines = [f'{i}. {a.get("agent_status", "unknown")} {label(a)}' for i, a in enumerate(current, 1)]
-            return "\n".join(lines) + "\nUse /screen N, /send N text, or /keys N key.", None
+            footer = "\nUse /screen N, /send N text, or /keys N key."
+            if chat_id and str(chat_id).endswith("@g.us"):
+                footer += f"\n(ID deste grupo: {chat_id})"
+            return "\n".join(lines) + footer, None
         if action in ("/screen", "/send", "/keys"):
             if len(parts) < 2 or not parts[1].isdigit():
                 return f"Usage: {action} N" + (" text" if action == "/send" else " key" if action == "/keys" else ""), None
@@ -184,7 +187,7 @@ class Bridge:
             self.started = True
             self.last_chat_id = incoming_chat
         try:
-            answer, agent_key = self.command(body_text, reply_id)
+            answer, agent_key = self.command(body_text, reply_id, chat_id=incoming_chat)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, KeyError, OSError, ValueError) as exc:
             answer, agent_key = f"Herdr command failed: {type(exc).__name__}", None
         self.send(answer, agent_key, target_chat=incoming_chat)
