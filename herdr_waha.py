@@ -250,7 +250,7 @@ class Bridge:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with urllib.request.urlopen(request, timeout=20) as response:
                 return json.load(response)
         except Exception as exc:
             print(f"failed to link group {group_id} to community {target_comm}: {exc}", flush=True)
@@ -271,8 +271,51 @@ class Bridge:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=20) as response:
             return json.load(response)
+
+    def archive_chat(self, chat_id, archive=True):
+        if not chat_id:
+            return False
+        action = "archive" if archive else "unarchive"
+        for ep in (f"/api/{self.session}/chats/{chat_id}/{action}", f"/api/chats/{chat_id}/{action}"):
+            try:
+                payload = json.dumps({"session": self.session, "chatId": chat_id}).encode()
+                req = urllib.request.Request(
+                    self.base_url + ep, data=payload,
+                    headers={
+                        "X-Api-Key": self.api_key,
+                        "Content-Type": "application/json",
+                        "User-Agent": "ZapForge-Herdr-Bridge/1.0",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def pin_chat(self, chat_id, pin=True):
+        if not chat_id:
+            return False
+        for ep in (f"/api/{self.session}/chats/{chat_id}/pin", f"/api/chats/{chat_id}/pin"):
+            try:
+                payload = json.dumps({"session": self.session, "chatId": chat_id}).encode()
+                req = urllib.request.Request(
+                    self.base_url + ep, data=payload,
+                    headers={
+                        "X-Api-Key": self.api_key,
+                        "Content-Type": "application/json",
+                        "User-Agent": "ZapForge-Herdr-Bridge/1.0",
+                    },
+                    method="PUT" if pin else "DELETE",
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    return True
+            except Exception:
+                pass
+        return False
 
     def record_seen(self, message_id):
         if not message_id or "\n" in message_id or "\r" in message_id:
@@ -307,17 +350,37 @@ class Bridge:
                 self.listed = [key(a) for a in current]
             if not current:
                 return "Nenhum agente ativo no momento.", None
-            lines = []
+            lines = ["🤖 *Swarm de Agentes Herdr:*\n"]
             for i, a in enumerate(current, 1):
                 st = a.get("agent_status", "unknown")
                 emoji = STATUS_EMOJIS.get(st, "👀")
                 lbl = label(a)
+                tokens = a.get("tokens") or {}
+                model = tokens.get("quota_model") or tokens.get("quota_provider_model") or a.get("agent", "")
+                ctx = tokens.get("quota_context") or ""
+                q5h = tokens.get("quota_5h_normal") or ""
+                topic = tokens.get("quota_topic") or ""
                 ch = self.channels.get(a["pane_id"])
                 ch_indicator = " [canal ativo]" if ch and ch.get("group_id") else ""
-                lines.append(f"{i}. {emoji} {lbl} ({st}){ch_indicator}")
-            footer = "\n_Use /screen N, /send N <texto>, ou /keys N <tecla>._"
+
+                meta_parts = []
+                if model:
+                    meta_parts.append(f"🧠 `{model}`")
+                if ctx:
+                    meta_parts.append(f"📦 `{ctx}`")
+                if q5h:
+                    meta_parts.append(f"⏱️ `{q5h}`")
+
+                meta_str = " · ".join(meta_parts)
+                line = f"{i}. {emoji} *{lbl}* ({st}){ch_indicator}"
+                if meta_str:
+                    line += f"\n   {meta_str}"
+                if topic:
+                    line += f"\n   🎯 _{topic[:90]}_"
+                lines.append(line)
+            footer = "\n\n💡 *Comandos no canal:* `/abort`, `/diff`, `/screen`, `/limpar`."
             if chat_id and str(chat_id).endswith("@g.us"):
-                footer += f"\n(ID deste grupo: {chat_id})"
+                footer += f"\n(ID deste grupo: `{chat_id}`)"
             return "\n".join(lines) + footer, None
 
         if action in ("/groups", "/admin_groups", "/comunidades", "/comunidade"):
@@ -328,8 +391,19 @@ class Bridge:
             for i, g in enumerate(adms[:20], 1):
                 tipo = "🌐 [Comunidade]" if g["is_community"] else ("📢 [Avisos]" if g["is_announce"] else "👥 [Grupo]")
                 lines.append(f"{i}. {tipo} *{g['subject']}*\n   `{g['id']}`")
-            lines.append(f"\n⚙️ *Configuração Atual:*\n• Destino: *{self.notify_target}*\n• Avisos/Concluídos: `{self.announce_chat or 'nenhum'}`\n\n💡 *Comandos:*\n• `/notify channels` (somente canais dos agentes)\n• `/notify community` (canais + comunidade de avisos)\n• `/notify dm` (somente privado)\n• `/set_announce <ID@g.us>` (muda canal de avisos)")
+            lines.append(f"\n⚙️ *Configuração Atual:*\n• Destino: *{self.notify_target}*\n• Avisos/Concluídos: `{self.announce_chat or 'nenhum'}`\n\n💡 *Comandos:*\n• `/notify channels` (somente canais dos agentes)\n• `/notify community` (canais + comunidade de avisos)\n• `/notify dm` (somente privado)\n• `/set_announce <ID@g.us>` (muda canal de avisos)\n• `/limpar` (arquiva canais de agentes finalizados)")
             return "\n".join(lines), None
+
+        if action in ("/limpar", "/archive", "/archive_all", "/clean"):
+            archived = 0
+            with self.lock:
+                for p_id, c in self.channels.items():
+                    if c.get("retired") or c.get("status") in ("exited", "done"):
+                        gid = c.get("group_id")
+                        if gid and self.archive_chat(gid, True):
+                            self.pin_chat(gid, False)
+                            archived += 1
+            return f"🧹 *Limpeza de canais concluída!*\n{archived} canal(is) finalizado(s) arquivado(s). A tela principal fica limpa e o histórico permanece em 'Arquivadas'.", None
 
         if action == "/notify":
             if len(parts) > 1 and parts[1].lower() in ("channels", "groups", "community", "dm", "both"):
@@ -401,6 +475,12 @@ class Bridge:
         body_text = payload["body"].strip()
         message_id = payload["id"]
 
+        # Anti-loop guard: never process bridge's own notifications, replies or bot echoes
+        if payload.get("fromMe"):
+            return
+        if any(body_text.startswith(p) for p in ("📨 Prompt enviado", "🏆 ", "🤖 ", "🏁 ", "⚠️ ", "⌨️ ", "🖥️ Terminal", "Enviado para ", "Erro ao ")):
+            return
+
         # 1. Check if message is inside an agent's dedicated WhatsApp group/channel
         pane_id, ch = self.find_channel_by_chat(incoming_chat)
         if ch:
@@ -409,6 +489,40 @@ class Bridge:
             print(f"direct channel input for {pane_id} ({ch.get('label')}): '{body_text}'", flush=True)
 
             lower = body_text.lower()
+            if lower in ("/abort", "/stop", "/cancel", "/parar", "/cancelar"):
+                try:
+                    herdr("agent", "send-keys", pane_id, "C-c", "C-c")
+                    abort_msg = f"🛑 *Execução interrompida via Ctrl+C no agente `{ch.get('label')}`.*"
+                    self.send(abort_msg, target_chat=incoming_chat)
+                    self.sync_to_zapforge(incoming_chat, ch.get("label"), "operator", "/abort")
+                except Exception as exc:
+                    self.send(f"Erro ao interromper agente: {exc}", target_chat=incoming_chat)
+                return
+
+            if lower in ("/diff", "/git", "/mudancas", "/changes"):
+                cwd = ch.get("cwd") or ""
+                if not cwd or not os.path.isdir(cwd):
+                    self.send("⚠️ Diretório do projeto não encontrado.", target_chat=incoming_chat)
+                    return
+                try:
+                    st = subprocess.run(["git", "-C", cwd, "status", "-s"], capture_output=True, text=True, timeout=8)
+                    diff = subprocess.run(["git", "-C", cwd, "diff", "--stat"], capture_output=True, text=True, timeout=8)
+                    status_txt = st.stdout.strip()
+                    diff_txt = diff.stdout.strip()
+                    if not status_txt and not diff_txt:
+                        res = f"🌿 *Git limpo ({ch.get('label')}):* Nenhuma modificação pendente no repositório."
+                    else:
+                        parts = [f"📄 *Alterações no Repositório ({ch.get('label')}):*"]
+                        if status_txt:
+                            parts.append(f"```\n{status_txt[:1200]}\n```")
+                        if diff_txt:
+                            parts.append(f"📊 *Estatísticas:* ```\n{diff_txt[:1200]}\n```")
+                        res = "\n\n".join(parts)
+                    self.send(res, target_chat=incoming_chat)
+                except Exception as exc:
+                    self.send(f"Erro ao verificar diff: {exc}", target_chat=incoming_chat)
+                return
+
             if lower.startswith("/screen"):
                 lines = self.terminal_lines
                 parts = body_text.split()
@@ -455,20 +569,34 @@ class Bridge:
             if lower in short_keys or (body_text.isdigit() and len(body_text) <= 2):
                 key_to_send = short_keys.get(lower, body_text)
                 try:
-                    herdr("agent", "send-keys", pane_id, key_to_send)
-                    key_msg = f"⌨️ Tecla `{key_to_send}` enviada."
+                    # In CLI prompts (options, y/n), send key followed by Enter for confirmation
+                    if key_to_send in ("Escape", "Escape"):
+                        herdr("agent", "send-keys", pane_id, key_to_send)
+                        key_msg = f"⌨️ Tecla `{key_to_send}` enviada."
+                    else:
+                        herdr("agent", "send-keys", pane_id, key_to_send, "Enter")
+                        key_msg = f"⌨️ Tecla `{key_to_send}` enviada (com Enter)."
                     self.send(key_msg, target_chat=incoming_chat)
                     self.sync_to_zapforge(incoming_chat, ch.get("label"), "operator", body_text)
                 except Exception as exc:
                     self.send(f"Erro ao enviar tecla: {exc}", target_chat=incoming_chat)
                 return
 
-            # Normal prompt dispatch
+            # Normal prompt dispatch (with fallback to send-keys if agent is blocked)
             try:
                 herdr("agent", "prompt", pane_id, body_text)
                 self.send(f"📨 Prompt enviado para `{ch.get('label')}`.", target_chat=incoming_chat)
                 self.sync_to_zapforge(incoming_chat, ch.get("label"), "operator", body_text)
             except Exception as exc:
+                err_str = str(exc)
+                if "agent_blocked" in err_str or ch.get("status") == "blocked":
+                    try:
+                        herdr("agent", "send-keys", pane_id, body_text, "Enter")
+                        self.send(f"⌨️ Resposta enviada ao terminal do agente: `{body_text}`", target_chat=incoming_chat)
+                        self.sync_to_zapforge(incoming_chat, ch.get("label"), "operator", body_text)
+                        return
+                    except Exception as k_err:
+                        print(f"fallback send-keys failed: {k_err}", flush=True)
                 self.send(f"Erro ao enviar prompt: {exc}", target_chat=incoming_chat)
             return
 
@@ -551,6 +679,8 @@ class Bridge:
                         )
                         self.send(welcome_text, target_chat=group_id)
                         self.sync_to_zapforge(group_id, lbl, "assistant", welcome_text)
+                        self.archive_chat(group_id, False)
+                        self.pin_chat(group_id, True)
 
                         if self.announce_chat and self.announce_chat != group_id:
                             ann_text = (
@@ -568,6 +698,11 @@ class Bridge:
                     continue
 
             if ch:
+                if ch.get("retired"):
+                    ch["retired"] = False
+                    self.archive_chat(ch.get("group_id"), False)
+                    self.pin_chat(ch.get("group_id"), True)
+
                 if self.community_id and not ch.get("community_linked"):
                     self.link_group_to_community(ch.get("group_id"), self.community_id)
                     ch["community_linked"] = True
@@ -602,9 +737,18 @@ class Bridge:
                             if self.notify_target in ("channels", "community", "both") and self.announce_chat and self.announce_chat != group_id:
                                 self.send(f"⚠️ *Agente bloqueado (❓)*: {lbl}\nAcesse o canal do agente para responder.", target_chat=self.announce_chat)
 
-                            # 3. Manda no privado SOMENTE se explicitamente configurado como dm ou both
-                            if self.notify_target in ("dm", "both") and self.operator_id:
-                                self.send(f"⚠️ *Agente bloqueado (❓)*: {lbl}\nAcesse o canal do agente para responder.", target_chat=self.operator_id)
+                            # 3. Manda alerta urgente no privado do operador para vibrar o celular
+                            if self.operator_id:
+                                urgent_alert = (
+                                    f"🚨 *AÇÃO NECESSÁRIA NO HERDR!*\n\n"
+                                    f"🏷️ Agente: *{lbl}*\n"
+                                    f"O agente está parado aguardando sua resposta.\n"
+                                    f"👉 Acesse o grupo do agente para responder com `1`, `2`, `y` ou texto livre."
+                                )
+                                try:
+                                    self.send(urgent_alert, target_chat=self.operator_id)
+                                except Exception:
+                                    pass
                         except Exception as exc:
                             print(f"failed to send blocked alert for {pane_id}: {exc}", flush=True)
 
@@ -643,9 +787,11 @@ class Bridge:
                 print(f"agent {pane_id} ({lbl}) exited.", flush=True)
                 if group_id:
                     try:
-                        exited_subj = f"🏁 {lbl}"[:100]
+                        exited_subj = f"🏁 [Histórico] {lbl}"[:100]
                         self.set_group_subject(group_id, exited_subj)
-                        self.send("🏁 *Agente finalizado/desconectado.*", target_chat=group_id)
+                        self.send("🏁 *Agente finalizado/desconectado.*\n\n_Canal arquivado para manter a lista do WhatsApp limpa. O histórico segue disponível em 'Arquivadas'._", target_chat=group_id)
+                        self.pin_chat(group_id, False)
+                        self.archive_chat(group_id, True)
                     except Exception as exc:
                         print(f"failed to mark group exited for {group_id}: {exc}", flush=True)
                 ch["status"] = "exited"
