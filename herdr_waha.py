@@ -183,8 +183,69 @@ class Bridge:
         expected = hmac.new(self.hook_key, body, hashlib.sha512).hexdigest()
         return hmac.compare_digest(actual, expected)
 
-    def send(self, text, agent_key=None, target_chat=None):
+    def send_presence(self, chat_id, presence="composing"):
+        try:
+            payload = json.dumps({"session": self.session, "chatId": chat_id, "presence": presence}).encode()
+            request = urllib.request.Request(
+                f"{self.base_url}/api/presence", data=payload, method="POST",
+                headers={
+                    "X-Api-Key": self.api_key,
+                    "Content-Type": "application/json",
+                    "User-Agent": "ZapForge-Herdr-Bridge/1.0",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=3) as resp:
+                pass
+        except Exception:
+            pass
+
+    def react(self, message_id, emoji):
+        if not message_id or not emoji:
+            return
+        try:
+            payload = json.dumps({"session": self.session, "messageId": message_id, "reaction": emoji}).encode()
+            request = urllib.request.Request(
+                f"{self.base_url}/api/reaction", data=payload, method="PUT",
+                headers={
+                    "X-Api-Key": self.api_key,
+                    "Content-Type": "application/json",
+                    "User-Agent": "ZapForge-Herdr-Bridge/1.0",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=5) as resp:
+                pass
+        except Exception as exc:
+            print(f"failed to send reaction: {exc}", flush=True)
+
+    def edit_message(self, chat_id, message_id, text):
+        if not chat_id or not message_id or not text:
+            return False
+        try:
+            payload = json.dumps({"session": self.session, "text": text[:3800]}).encode()
+            enc_session = urllib.parse.quote(self.session)
+            enc_chat = urllib.parse.quote(chat_id)
+            enc_msg = urllib.parse.quote(message_id)
+            endpoint = f"{self.base_url}/api/{enc_session}/chats/{enc_chat}/messages/{enc_msg}"
+            request = urllib.request.Request(
+                endpoint, data=payload, method="PUT",
+                headers={
+                    "X-Api-Key": self.api_key,
+                    "Content-Type": "application/json",
+                    "User-Agent": "ZapForge-Herdr-Bridge/1.0",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=8) as resp:
+                return True
+        except Exception as exc:
+            print(f"failed to edit message: {exc}", flush=True)
+            return False
+
+    def send(self, text, agent_key=None, target_chat=None, skip_typing=False):
         destination = target_chat or self.last_chat_id or self.operator_id
+        if not skip_typing and len(text) > 15:
+            self.send_presence(destination, "composing")
+            delay = min(1.0, max(0.2, len(text) * 0.002))
+            time.sleep(delay)
         payload = json.dumps({"session": self.session, "chatId": destination, "text": text[:3800]}).encode()
         request = urllib.request.Request(
             self.base_url + "/api/sendText", data=payload,
@@ -450,9 +511,95 @@ class Bridge:
         herdr("agent", "prompt", current["pane_id"], text)
         return f"Enviado para {label(current)}.", agent_key
 
+    def handle_reaction(self, payload, incoming_chat, incoming_from):
+        reaction_data = payload.get("reaction") or {}
+        emoji = reaction_data.get("text") or payload.get("body") or ""
+        target_message_id = reaction_data.get("messageId") or payload.get("id") or ""
+        if not emoji:
+            return
+
+        # Find the agent channel for this chat
+        pane_id, ch = self.find_channel_by_chat(incoming_chat)
+        if not ch:
+            return
+
+        label_name = ch.get("label", pane_id)
+        print(f"operator reaction '{emoji}' in {incoming_chat} for {pane_id} ({label_name})", flush=True)
+
+        # 1. Approval / Confirm (👍, ✅, 👌, 🟢)
+        if emoji in ("👍", "✅", "👌", "🟢"):
+            try:
+                is_blocked = ch.get("status") == "blocked"
+                if is_blocked:
+                    herdr("agent", "send-keys", pane_id, "y", "Enter")
+                    self.send(f"👍 *Aprovado (y + Enter) no agente `{label_name}`.*", target_chat=incoming_chat)
+                else:
+                    herdr("agent", "send-keys", pane_id, "Enter")
+                    self.send(f"👍 *Confirmado (Enter) no agente `{label_name}`.*", target_chat=incoming_chat)
+                self.react(target_message_id, "✅")
+                self.sync_to_zapforge(incoming_chat, label_name, "operator", f"[Reação {emoji}: Confirmar]")
+            except Exception as exc:
+                self.send(f"Erro ao confirmar via reação: {exc}", target_chat=incoming_chat)
+            return
+
+        # 2. Abort / Cancel (🛑, ❌, ⛔, 🔴)
+        if emoji in ("🛑", "❌", "⛔", "🔴"):
+            try:
+                herdr("agent", "send-keys", pane_id, "C-c", "C-c")
+                self.send(f"🛑 *Execução interrompida via reação no agente `{label_name}`.*", target_chat=incoming_chat)
+                self.react(target_message_id, "🛑")
+                self.sync_to_zapforge(incoming_chat, label_name, "operator", f"[Reação {emoji}: Abortar]")
+            except Exception as exc:
+                self.send(f"Erro ao cancelar via reação: {exc}", target_chat=incoming_chat)
+            return
+
+        # 3. Screen (📄, 📜, 🖥️)
+        if emoji in ("📄", "📜", "🖥️"):
+            try:
+                screen = self.read_terminal(pane_id, lines=self.terminal_lines)
+                clean_screen = screen.strip()
+                if len(clean_screen) > 3400:
+                    wa_screen = clean_screen[-3200:]
+                    notice = "\n\n_💡 Exibindo últimas linhas._"
+                else:
+                    wa_screen = clean_screen
+                    notice = ""
+                screen_text = f"🖥️ *Terminal ({label_name}):*\n\n```\n{wa_screen}\n```" + notice
+                self.send(screen_text, target_chat=incoming_chat)
+                self.react(target_message_id, "👀")
+            except Exception as exc:
+                self.send(f"Erro ao ler tela via reação: {exc}", target_chat=incoming_chat)
+            return
+
+        # 4. Git Diff (🔍, 🔀, 📊)
+        if emoji in ("🔍", "🔀", "📊"):
+            cwd = ch.get("cwd") or ""
+            if not cwd or not os.path.isdir(cwd):
+                self.send("⚠️ Diretório do projeto não encontrado.", target_chat=incoming_chat)
+                return
+            try:
+                st = subprocess.run(["git", "-C", cwd, "status", "-s"], capture_output=True, text=True, timeout=8)
+                diff = subprocess.run(["git", "-C", cwd, "diff", "--stat"], capture_output=True, text=True, timeout=8)
+                status_txt = st.stdout.strip()
+                diff_txt = diff.stdout.strip()
+                if not status_txt and not diff_txt:
+                    res = f"🌿 *Git limpo ({label_name}):* Nenhuma modificação pendente."
+                else:
+                    parts = [f"📄 *Alterações no Repositório ({label_name}):*"]
+                    if status_txt:
+                        parts.append(f"```\n{status_txt[:1200]}\n```")
+                    if diff_txt:
+                        parts.append(f"📊 *Estatísticas:* ```\n{diff_txt[:1200]}\n```")
+                    res = "\n\n".join(parts)
+                self.send(res, target_chat=incoming_chat)
+                self.react(target_message_id, "🔍")
+            except Exception as exc:
+                self.send(f"Erro ao obter diff via reação: {exc}", target_chat=incoming_chat)
+            return
+
     def handle(self, event):
         payload = event.get("payload") or {}
-        incoming_chat = payload.get("chatId") or payload.get("from") or ""
+        incoming_chat = payload.get("chatId") or payload.get("from") or payload.get("to") or ""
         incoming_from = payload.get("participant") or payload.get("from") or ""
         meta = event.get("metadata") or {}
         session_matches = (
@@ -463,20 +610,27 @@ class Bridge:
             or meta.get("phone") == self.session
             or same_phone(self.session, meta.get("phone"))
         )
-        if (event.get("event") != "message" or not session_matches
-                or not payload.get("id")
-                or not isinstance(payload.get("body"), str) or not payload["body"].strip()):
+        event_name = event.get("event")
+        if event_name not in ("message", "message.reaction") or not session_matches:
             return
 
         sender_matches = same_phone(self.operator_id, incoming_from)
         if not sender_matches:
             return
 
+        if event_name == "message.reaction":
+            self.handle_reaction(payload, incoming_chat, incoming_from)
+            return
+
+        if not payload.get("id") or not isinstance(payload.get("body"), str) or not payload["body"].strip():
+            return
+
         body_text = payload["body"].strip()
         message_id = payload["id"]
 
         # Anti-loop guard: never process bridge's own notifications, replies or bot echoes
-        if payload.get("fromMe"):
+        is_self_chat = same_phone(self.operator_id, incoming_chat)
+        if payload.get("fromMe") and not is_self_chat:
             return
         if any(body_text.startswith(p) for p in ("📨 Prompt enviado", "🏆 ", "🤖 ", "🏁 ", "⚠️ ", "⌨️ ", "🖥️ Terminal", "Enviado para ", "Erro ao ")):
             return

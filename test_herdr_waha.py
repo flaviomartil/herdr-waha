@@ -62,7 +62,7 @@ class BridgeTest(unittest.TestCase):
         reused = dict(self.agent, terminal_id="second")
         with patch("herdr_waha.agents", return_value=[reused]), patch("herdr_waha.herdr") as call:
             text, _ = self.bridge.command("do more", "outbound")
-            self.assertEqual(text, "That agent is no longer active.")
+            self.assertEqual(text, "Este agente não está mais ativo.")
             call.assert_not_called()
 
     def test_send_uses_waha_session_and_api_key(self):
@@ -165,9 +165,45 @@ class BridgeTest(unittest.TestCase):
                 "body": "Bom dia pessoal, alguém revisou o PR?",
             },
         }
-        with patch("herdr_waha.agents", return_value=[self.agent]), patch.object(self.bridge, "send") as send:
+    def test_reaction_approval(self):
+        ch_id = "120363028392999999@g.us"
+        self.bridge.channels["pane"] = {
+            "group_id": ch_id, "label": "test-agent", "status": "blocked", "pane_id": "pane"
+        }
+        event = {
+            "event": "message.reaction", "session": "connected",
+            "payload": {
+                "id": "react_1",
+                "chatId": ch_id,
+                "participant": "5511999999999@c.us",
+                "reaction": {"text": "👍", "messageId": "msg_prompt_1"},
+            },
+        }
+        with patch("herdr_waha.herdr") as mock_herdr, patch.object(self.bridge, "send") as mock_send, patch.object(self.bridge, "react") as mock_react, patch.object(self.bridge, "sync_to_zapforge"):
             self.bridge.handle(event)
-            send.assert_not_called()
+            mock_herdr.assert_any_call("agent", "send-keys", "pane", "y", "Enter")
+            mock_send.assert_called_once()
+            mock_react.assert_called_once_with("msg_prompt_1", "✅")
+
+    def test_reaction_abort(self):
+        ch_id = "120363028392999999@g.us"
+        self.bridge.channels["pane"] = {
+            "group_id": ch_id, "label": "test-agent", "status": "running", "pane_id": "pane"
+        }
+        event = {
+            "event": "message.reaction", "session": "connected",
+            "payload": {
+                "id": "react_2",
+                "chatId": ch_id,
+                "participant": "5511999999999@c.us",
+                "reaction": {"text": "🛑", "messageId": "msg_prompt_2"},
+            },
+        }
+        with patch("herdr_waha.herdr") as mock_herdr, patch.object(self.bridge, "send") as mock_send, patch.object(self.bridge, "react") as mock_react, patch.object(self.bridge, "sync_to_zapforge"):
+            self.bridge.handle(event)
+            mock_herdr.assert_any_call("agent", "send-keys", "pane", "C-c", "C-c")
+            mock_send.assert_called_once()
+            mock_react.assert_called_once_with("msg_prompt_2", "🛑")
 
 
 if __name__ == "__main__":
