@@ -193,6 +193,15 @@ class Bridge:
 
 def serve(bridge, listen):
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path in ("/webhook/waha", "/health", "/"):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok","service":"herdr-waha"}')
+            else:
+                self.send_error(404)
+
         def do_POST(self):
             if self.path != "/webhook/waha":
                 self.send_error(404)
