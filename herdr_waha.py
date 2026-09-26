@@ -83,7 +83,12 @@ class Bridge:
         payload = json.dumps({"session": self.session, "chatId": destination, "text": text[:3800]}).encode()
         request = urllib.request.Request(
             self.base_url + "/api/sendText", data=payload,
-            headers={"X-Api-Key": self.api_key, "Content-Type": "application/json"}, method="POST",
+            headers={
+                "X-Api-Key": self.api_key,
+                "Content-Type": "application/json",
+                "User-Agent": "ZapForge-Herdr-Bridge/1.0",
+            },
+            method="POST",
         )
         with urllib.request.urlopen(request, timeout=10) as response:
             result = json.load(response)
