@@ -49,7 +49,7 @@ def same_phone(configured_id, incoming_id):
 
 
 class Bridge:
-    def __init__(self, base_url, api_key, session, hook_key, operator_id, state_path):
+    def __init__(self, base_url, api_key, session, hook_key, operator_id, state_path, allowed_chat=None):
         operator_id = operator_id.strip()
         if not operator_id.endswith("@c.us"):
             operator_id = f"{operator_id}@c.us"
@@ -60,6 +60,8 @@ class Bridge:
         self.session = session
         self.hook_key = hook_key.encode()
         self.operator_id = operator_id
+        self.allowed_chat = allowed_chat.strip() if allowed_chat else None
+        self.last_chat_id = self.allowed_chat or self.operator_id
         self.state_path = Path(state_path)
         self.lock = threading.RLock()
         self.seen = set(self.state_path.read_text().splitlines()) if self.state_path.exists() else set()
@@ -76,8 +78,9 @@ class Bridge:
         expected = hmac.new(self.hook_key, body, hashlib.sha512).hexdigest()
         return hmac.compare_digest(actual, expected)
 
-    def send(self, text, agent_key=None):
-        payload = json.dumps({"session": self.session, "chatId": self.operator_id, "text": text[:3800]}).encode()
+    def send(self, text, agent_key=None, target_chat=None):
+        destination = target_chat or self.last_chat_id or self.operator_id
+        payload = json.dumps({"session": self.session, "chatId": destination, "text": text[:3800]}).encode()
         request = urllib.request.Request(
             self.base_url + "/api/sendText", data=payload,
             headers={"X-Api-Key": self.api_key, "Content-Type": "application/json"}, method="POST",
@@ -87,9 +90,11 @@ class Bridge:
         message_id = result.get("id")
         if isinstance(message_id, dict):
             message_id = message_id.get("_serialized")
-        if agent_key and message_id:
+        if message_id:
             with self.lock:
-                self.replies[message_id] = agent_key
+                self.seen.add(str(message_id))
+                if agent_key:
+                    self.replies[message_id] = agent_key
         return message_id
 
     def command(self, text, reply_id=""):
@@ -139,15 +144,26 @@ class Bridge:
 
     def handle(self, event):
         payload = event.get("payload") or {}
-        incoming_from = payload.get("from") or ""
-        incoming_chat = payload.get("chatId") or ""
+        incoming_chat = payload.get("chatId") or payload.get("from") or ""
+        incoming_from = payload.get("participant") or payload.get("from") or ""
         if (event.get("event") != "message" or event.get("session") != self.session
-                or payload.get("fromMe")
-                or not same_phone(self.operator_id, incoming_chat)
-                or not same_phone(self.operator_id, incoming_from)
                 or not payload.get("id")
                 or not isinstance(payload.get("body"), str) or not payload["body"].strip()):
             return
+
+        sender_matches = same_phone(self.operator_id, incoming_from)
+        if not sender_matches:
+            return
+
+        if self.allowed_chat and not (incoming_chat == self.allowed_chat or same_phone(self.allowed_chat, incoming_chat)):
+            return
+
+        body_text = payload["body"].strip()
+        reply_id = (payload.get("replyTo") or {}).get("id", "")
+        is_cmd = body_text.startswith("/") or (reply_id and reply_id in self.replies)
+        if not is_cmd:
+            return
+
         message_id = payload["id"]
         if "\n" in message_id or "\r" in message_id:
             raise ValueError("invalid message ID")
@@ -161,12 +177,12 @@ class Bridge:
                 os.fsync(file.fileno())
             self.seen.add(message_id)
             self.started = True
-        reply_id = (payload.get("replyTo") or {}).get("id", "")
+            self.last_chat_id = incoming_chat
         try:
-            answer, agent_key = self.command(payload["body"], reply_id)
+            answer, agent_key = self.command(body_text, reply_id)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, KeyError, OSError, ValueError) as exc:
             answer, agent_key = f"Herdr command failed: {type(exc).__name__}", None
-        self.send(answer, agent_key)
+        self.send(answer, agent_key, target_chat=incoming_chat)
 
     def poll(self):
         while True:
@@ -184,7 +200,7 @@ class Bridge:
                         self.statuses[agent_key] = status
                 for agent, agent_key in notices:
                     try:
-                        self.send(f'{label(agent)}: {agent["agent_status"]}. Use /agents and /screen N, or /keys N key for a dialog.', agent_key)
+                        self.send(f'{label(agent)}: {agent["agent_status"]}. Use /agents and /screen N, or /keys N key for a dialog.', agent_key, target_chat=self.last_chat_id)
                     except (OSError, urllib.error.URLError, ValueError) as exc:
                         print(f"notification failed: {type(exc).__name__}", flush=True)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, KeyError, ValueError) as exc:
@@ -234,7 +250,8 @@ def main():
     if missing:
         raise SystemExit("Missing: " + ", ".join(missing))
     state = os.environ.get("HERDR_WA_STATE", str(Path.home() / ".config/herdr-waha/seen"))
-    bridge = Bridge(*(os.environ[name] for name in names), state)
+    allowed_chat = os.environ.get("HERDR_WA_CHAT_ID") or os.environ.get("HERDR_WA_GROUP_ID")
+    bridge = Bridge(*(os.environ[name] for name in names), state, allowed_chat=allowed_chat)
     agents()
     serve(bridge, os.environ.get("HERDR_WA_LISTEN", "127.0.0.1:8080"))
 

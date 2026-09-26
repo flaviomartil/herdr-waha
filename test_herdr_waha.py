@@ -84,6 +84,91 @@ class BridgeTest(unittest.TestCase):
             self.assertEqual(self.bridge.send("hello", ("pane", "first")), "outbound")
         self.assertEqual(self.bridge.replies["outbound"], ("pane", "first"))
 
+    def test_group_chat_operator_and_non_operator(self):
+        group_id = "120363028392000000@g.us"
+        event = {
+            "event": "message", "session": "connected",
+            "payload": {
+                "id": "group_msg_1",
+                "from": group_id,
+                "chatId": group_id,
+                "participant": "5511999999999@c.us",
+                "body": "/agents",
+            },
+        }
+        with patch("herdr_waha.agents", return_value=[self.agent]), patch.object(self.bridge, "send") as send:
+            # 1. Non-operator in group is rejected
+            event["payload"]["participant"] = "5511888887777@c.us"
+            self.bridge.handle(event)
+            send.assert_not_called()
+
+            # 2. Operator in group is accepted and reply is directed to group chatId
+            event["payload"]["participant"] = "5511999999999@c.us"
+            self.bridge.handle(event)
+            send.assert_called_once()
+            self.assertEqual(send.call_args.kwargs.get("target_chat"), group_id)
+
+    def test_self_chat_with_from_me(self):
+        event = {
+            "event": "message", "session": "connected",
+            "payload": {
+                "id": "self_msg_1",
+                "from": "5511999999999@c.us",
+                "chatId": "5511999999999@c.us",
+                "fromMe": True,
+                "body": "/agents",
+            },
+        }
+        with patch("herdr_waha.agents", return_value=[self.agent]), patch.object(self.bridge, "send") as send:
+            self.bridge.handle(event)
+            send.assert_called_once()
+            self.assertEqual(send.call_args.kwargs.get("target_chat"), "5511999999999@c.us")
+
+    def test_allowed_chat_restriction(self):
+        allowed_group = "120363028392111111@g.us"
+        restricted_bridge = herdr_waha.Bridge(
+            "https://waha.example", "api-key", "connected", "hook-key",
+            "5511999999999@c.us", Path(self.temp.name) / "seen_restricted",
+            allowed_chat=allowed_group,
+        )
+        event = {
+            "event": "message", "session": "connected",
+            "payload": {
+                "id": "restricted_msg_1",
+                "from": "other_chat@c.us",
+                "chatId": "other_chat@c.us",
+                "participant": "5511999999999@c.us",
+                "body": "/agents",
+            },
+        }
+        with patch("herdr_waha.agents", return_value=[self.agent]), patch.object(restricted_bridge, "send") as send:
+            # Not in allowed group -> rejected
+            restricted_bridge.handle(event)
+            send.assert_not_called()
+
+            # In allowed group -> accepted
+            event["payload"]["chatId"] = allowed_group
+            event["payload"]["from"] = allowed_group
+            event["payload"]["id"] = "restricted_msg_2"
+            restricted_bridge.handle(event)
+            send.assert_called_once()
+            self.assertEqual(send.call_args.kwargs.get("target_chat"), allowed_group)
+
+    def test_non_commands_are_silently_ignored(self):
+        event = {
+            "event": "message", "session": "connected",
+            "payload": {
+                "id": "chat_msg_1",
+                "from": "120363028392000000@g.us",
+                "chatId": "120363028392000000@g.us",
+                "participant": "5511999999999@c.us",
+                "body": "Bom dia pessoal, alguém revisou o PR?",
+            },
+        }
+        with patch("herdr_waha.agents", return_value=[self.agent]), patch.object(self.bridge, "send") as send:
+            self.bridge.handle(event)
+            send.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
