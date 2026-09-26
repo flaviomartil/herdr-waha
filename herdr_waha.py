@@ -85,7 +85,8 @@ class Bridge:
                 self.terminal_lines = 100
         self.stream_terminal = os.environ.get("HERDR_WA_STREAM_TERMINAL", "0") in ("1", "true", "yes", "on")
         self.community_id = os.environ.get("HERDR_WA_COMMUNITY_ID", "120363427816264803@g.us")
-        self.announce_chat = os.environ.get("HERDR_WA_COMMUNITY_ANNOUNCE", "120363433204257170@g.us")
+        self.announce_chat = os.environ.get("HERDR_WA_COMMUNITY_ANNOUNCE", "120363411783439303@g.us")
+        self.notify_target = os.environ.get("HERDR_WA_NOTIFY_TARGET", "channels").strip().lower()
 
         self.lock = threading.RLock()
         self.seen = set(self.state_path.read_text().splitlines()) if self.state_path.exists() else set()
@@ -100,6 +101,38 @@ class Bridge:
                 self.channels = json.loads(self.channels_path.read_text())
             except Exception:
                 self.channels = {}
+
+    def get_admin_groups(self):
+        try:
+            req = urllib.request.Request(
+                f"{self.base_url}/api/{self.session}/groups",
+                headers={
+                    "X-Api-Key": self.api_key,
+                    "Accept": "application/json",
+                    "User-Agent": "ZapForge-Herdr-Bridge/1.0",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.load(resp)
+            groups = list(data.values()) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            res = []
+            for g in groups:
+                is_comm = bool(g.get("isCommunity"))
+                is_ann = bool(g.get("isCommunityAnnounce"))
+                parts = g.get("participants") or []
+                is_adm = is_comm or any(p.get("admin") in ("admin", "superadmin") for p in parts)
+                if is_adm or is_comm or is_ann:
+                    res.append({
+                        "id": g.get("id"),
+                        "subject": g.get("subject") or "Sem nome",
+                        "is_community": is_comm,
+                        "is_announce": is_ann,
+                        "size": g.get("size") or len(parts),
+                    })
+            return res
+        except Exception as exc:
+            print(f"failed to fetch admin groups: {exc}", flush=True)
+            return []
 
     def read_terminal(self, pane_id, lines=None):
         n = lines if lines is not None else self.terminal_lines
@@ -255,6 +288,29 @@ class Bridge:
             if chat_id and str(chat_id).endswith("@g.us"):
                 footer += f"\n(ID deste grupo: {chat_id})"
             return "\n".join(lines) + footer, None
+
+        if action in ("/groups", "/admin_groups", "/comunidades", "/comunidade"):
+            adms = self.get_admin_groups()
+            if not adms:
+                return "Nenhum grupo ou comunidade onde você é administrador foi encontrado.", None
+            lines = ["📋 *Grupos e Comunidades onde você é Administrador:*\n"]
+            for i, g in enumerate(adms[:20], 1):
+                tipo = "🌐 [Comunidade]" if g["is_community"] else ("📢 [Avisos]" if g["is_announce"] else "👥 [Grupo]")
+                lines.append(f"{i}. {tipo} *{g['subject']}*\n   `{g['id']}`")
+            lines.append(f"\n⚙️ *Configuração Atual:*\n• Destino: *{self.notify_target}*\n• Avisos/Concluídos: `{self.announce_chat or 'nenhum'}`\n\n💡 *Comandos:*\n• `/notify channels` (somente canais dos agentes)\n• `/notify community` (canais + comunidade de avisos)\n• `/notify dm` (somente privado)\n• `/set_announce <ID@g.us>` (muda canal de avisos)")
+            return "\n".join(lines), None
+
+        if action == "/notify":
+            if len(parts) > 1 and parts[1].lower() in ("channels", "groups", "community", "dm", "both"):
+                self.notify_target = parts[1].lower()
+                return f"✅ Modo de notificação alterado para: *{self.notify_target}*.\n(Agora alertas de bloqueado/concluído respeitarão esta escolha).", None
+            return f"Modo atual: *{self.notify_target}*.\n\nOpções disponíveis:\n• `/notify channels` (apenas canais dos agentes)\n• `/notify community` (canais dos agentes + avisos)\n• `/notify dm` (apenas WhatsApp pessoal)\n• `/notify both` (canais + pessoal)", None
+
+        if action == "/set_announce":
+            if len(parts) > 1 and "@g.us" in parts[1]:
+                self.announce_chat = parts[1].strip()
+                return f"✅ Canal de avisos/concluídos atualizado para:\n`{self.announce_chat}`", None
+            return "Uso: `/set_announce <ID@g.us>`\n(Veja a lista com `/groups`)", None
 
         if action in ("/screen", "/send", "/keys"):
             if len(parts) < 2 or not parts[1].isdigit():
@@ -496,12 +552,18 @@ class Bridge:
                                 f"```\n{screen[-2500:]}\n```\n\n"
                                 f"_💡 Digite diretamente aqui sua resposta (ex: y, n, 1, 2, ou um texto)._"
                             )
-                            self.send(blocked_msg, target_chat=group_id)
+                            # 1. Envia para o canal dedicado do agente
+                            if self.notify_target in ("channels", "community", "both"):
+                                self.send(blocked_msg, target_chat=group_id)
                             self.sync_to_zapforge(group_id, lbl, "assistant", blocked_msg)
-                            if self.announce_chat and self.announce_chat != group_id:
+
+                            # 2. Avisa na comunidade (canal de avisos/general)
+                            if self.notify_target in ("channels", "community", "both") and self.announce_chat and self.announce_chat != group_id:
                                 self.send(f"⚠️ *Agente bloqueado (❓)*: {lbl}\nAcesse o canal do agente para responder.", target_chat=self.announce_chat)
-                            elif self.last_chat_id and self.last_chat_id != group_id:
-                                self.send(f"⚠️ *Agente bloqueado (❓)*: {lbl}\nAcesse o canal do agente para responder.", target_chat=self.last_chat_id)
+
+                            # 3. Manda no privado SOMENTE se explicitamente configurado como dm ou both
+                            if self.notify_target in ("dm", "both") and self.operator_id:
+                                self.send(f"⚠️ *Agente bloqueado (❓)*: {lbl}\nAcesse o canal do agente para responder.", target_chat=self.operator_id)
                         except Exception as exc:
                             print(f"failed to send blocked alert for {pane_id}: {exc}", flush=True)
 
@@ -513,12 +575,18 @@ class Bridge:
                                 f"```\n{screen[-2500:]}\n```\n\n"
                                 f"_Pronto para o próximo prompt._"
                             )
-                            self.send(done_msg, target_chat=group_id)
+                            # 1. Envia para o canal dedicado do agente
+                            if self.notify_target in ("channels", "community", "both"):
+                                self.send(done_msg, target_chat=group_id)
                             self.sync_to_zapforge(group_id, lbl, "assistant", done_msg)
-                            if self.announce_chat and self.announce_chat != group_id:
-                                self.send(f"🏆 *Tarefa concluída*: {lbl}", target_chat=self.announce_chat)
-                            elif self.last_chat_id and self.last_chat_id != group_id:
-                                self.send(f"🏆 *Tarefa concluída*: {lbl}", target_chat=self.last_chat_id)
+
+                            # 2. Avisa na comunidade (canal de avisos/concluídos)
+                            if self.notify_target in ("channels", "community", "both") and self.announce_chat and self.announce_chat != group_id:
+                                self.send(f"🏆 *Tarefa concluída*: {lbl}\nResultado gravado no canal do agente.", target_chat=self.announce_chat)
+
+                            # 3. Manda no privado SOMENTE se explicitamente configurado como dm ou both
+                            if self.notify_target in ("dm", "both") and self.operator_id:
+                                self.send(f"🏆 *Tarefa concluída*: {lbl}", target_chat=self.operator_id)
                         except Exception as exc:
                             print(f"failed to send done alert for {pane_id}: {exc}", flush=True)
 
