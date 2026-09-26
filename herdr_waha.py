@@ -207,12 +207,17 @@ class Bridge:
                     self.replies[message_id] = agent_key
         return message_id
 
-    def create_group(self, name, participants):
-        payload = json.dumps({
+    def create_group(self, name, participants, community_id=None):
+        payload_data = {
             "session": self.session,
             "name": name[:100],
             "participants": participants,
-        }).encode()
+        }
+        target_comm = community_id or self.community_id
+        if target_comm:
+            payload_data["parentCommunityId"] = target_comm
+            payload_data["communityId"] = target_comm
+        payload = json.dumps(payload_data).encode()
         request = urllib.request.Request(
             self.base_url + "/api/createGroup", data=payload,
             headers={
@@ -224,6 +229,32 @@ class Bridge:
         )
         with urllib.request.urlopen(request, timeout=15) as response:
             return json.load(response)
+
+    def link_group_to_community(self, group_id, community_id=None):
+        target_comm = community_id or self.community_id
+        if not target_comm or not group_id:
+            return None
+        payload = json.dumps({
+            "session": self.session,
+            "groupId": group_id,
+            "communityId": target_comm,
+            "description": f"[COMMUNITY_LINK]:{target_comm}",
+        }).encode()
+        request = urllib.request.Request(
+            self.base_url + "/api/linkGroupCommunity", data=payload,
+            headers={
+                "X-Api-Key": self.api_key,
+                "Content-Type": "application/json",
+                "User-Agent": "ZapForge-Herdr-Bridge/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return json.load(response)
+        except Exception as exc:
+            print(f"failed to link group {group_id} to community {target_comm}: {exc}", flush=True)
+            return None
 
     def set_group_subject(self, group_id, subject):
         payload = json.dumps({
@@ -484,9 +515,11 @@ class Bridge:
             if not ch and self.sync_channels:
                 print(f"auto-creating WhatsApp channel for {pane_id} ({lbl})...", flush=True)
                 try:
-                    res = self.create_group(target_subject, [self.operator_id])
+                    res = self.create_group(target_subject, [self.operator_id], community_id=self.community_id)
                     group_id = res.get("id")
                     if group_id:
+                        if self.community_id:
+                            self.link_group_to_community(group_id, self.community_id)
                         ch = {
                             "group_id": group_id,
                             "pane_id": pane_id,
@@ -495,13 +528,15 @@ class Bridge:
                             "cwd": agent.get("cwd"),
                             "status": st,
                             "subject": target_subject,
+                            "community_id": self.community_id,
+                            "community_linked": bool(self.community_id),
                             "retired": False,
                             "created_at": int(time.time()),
                         }
                         with self.lock:
                             self.channels[pane_id] = ch
                             self.save_channels()
-                        print(f"created WhatsApp channel {group_id} for {lbl}", flush=True)
+                        print(f"created WhatsApp channel {group_id} for {lbl} (community: {self.community_id})", flush=True)
 
                         welcome_text = (
                             f"🤖 *Canal do Agente Ativo*\n\n"
@@ -533,6 +568,12 @@ class Bridge:
                     continue
 
             if ch:
+                if self.community_id and not ch.get("community_linked"):
+                    self.link_group_to_community(ch.get("group_id"), self.community_id)
+                    ch["community_linked"] = True
+                    with self.lock:
+                        self.save_channels()
+
                 prev_status = ch.get("status")
                 group_id = ch.get("group_id")
 
