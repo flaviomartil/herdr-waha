@@ -125,6 +125,21 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(targets.count("120363001@g.us"), 2)
         self.assertIn(self.bridge.announce_chat, targets)
 
+    def test_group_create_and_backoff_fully_skipped_when_groups_disabled(self):
+        self.assertFalse(self.bridge.groups)
+        self.bridge.sync_channels = True
+        self.bridge.channels = {}
+        self.bridge.backoff = {}
+        with patch("herdr_waha.agents", return_value=[self.agent]), \
+                patch("herdr_waha.urllib.request.urlopen") as urlopen, \
+                patch.object(self.bridge, "create_group") as create:
+            self.bridge.reconcile_channels()
+            self.bridge.reconcile_channels()
+        create.assert_not_called()
+        urlopen.assert_not_called()
+        self.assertEqual(self.bridge.backoff, {})
+        self.assertEqual(self.bridge.channels, {})
+
     def test_presence_react_edit_use_message_endpoints(self):
         calls = []
 
