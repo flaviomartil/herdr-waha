@@ -64,7 +64,7 @@ class Bridge:
         if not operator_id.endswith("@c.us"):
             operator_id = f"{operator_id}@c.us"
         if not base_url.startswith(("http://", "https://")):
-            raise ValueError("WAHA_URL must be HTTP(S)")
+            raise ValueError("ZAPFORGE_URL must be HTTP(S)")
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.session = session
@@ -86,7 +86,9 @@ class Bridge:
         self.stream_terminal = os.environ.get("HERDR_WA_STREAM_TERMINAL", "0") in ("1", "true", "yes", "on")
         self.community_id = os.environ.get("HERDR_WA_COMMUNITY_ID", "120363427816264803@g.us")
         self.announce_chat = os.environ.get("HERDR_WA_COMMUNITY_ANNOUNCE", "120363411783439303@g.us")
-        self.notify_target = os.environ.get("HERDR_WA_NOTIFY_TARGET", "channels").strip().lower()
+        self.groups = os.environ.get("HERDR_WA_GROUPS", "0") in ("1", "true", "yes", "on")
+        self.notify_target = os.environ.get("HERDR_WA_NOTIFY_TARGET", "channels").strip().lower() if self.groups else "dm"
+        self.backoff = {}
 
         self.lock = threading.RLock()
         self.seen = set(self.state_path.read_text().splitlines()) if self.state_path.exists() else set()
@@ -101,19 +103,35 @@ class Bridge:
                 self.channels = json.loads(self.channels_path.read_text())
             except Exception:
                 self.channels = {}
+        self.backoff = self.channels.pop("__backoff__", {})
+        if not self.groups:
+            self.sync_channels = False
+
+    def debug(self, message):
+        if os.environ.get("HERDR_WA_DEBUG"):
+            print(f"debug: {message}", flush=True)
+
+    def call(self, method, path, body=None, timeout=8):
+        headers = {
+            "token": self.api_key,
+            "instance": self.session,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "ZapForge-Herdr-Bridge/1.0",
+        }
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            raw = resp.read()
+        return json.loads(raw) if raw else {}
+
+    @staticmethod
+    def number_of(chat_id):
+        return str(chat_id).split("@")[0]
 
     def get_admin_groups(self):
         try:
-            req = urllib.request.Request(
-                f"{self.base_url}/api/{self.session}/groups",
-                headers={
-                    "X-Api-Key": self.api_key,
-                    "Accept": "application/json",
-                    "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                data = json.load(resp)
+            data = self.call("GET", "/group/list").get("data")
             groups = list(data.values()) if isinstance(data, dict) else (data if isinstance(data, list) else [])
             res = []
             for g in groups:
@@ -143,34 +161,22 @@ class Bridge:
 
     def sync_to_zapforge(self, group_id, label, role, text, metadata=None):
         try:
-            payload = json.dumps({
+            self.call("POST", "/api/herdr/sync-message", {
                 "session": self.session,
                 "groupId": group_id,
                 "label": label,
                 "role": role,
                 "text": text[:25000],
                 "metadata": metadata or {},
-            }).encode()
-            req = urllib.request.Request(
-                self.base_url + "/api/herdr/sync-message",
-                data=payload,
-                headers={
-                    "X-Api-Key": self.api_key,
-                    "Content-Type": "application/json",
-                    "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                pass
+            }, timeout=5)
         except Exception as exc:
-            pass
+            self.debug(f"sync_to_zapforge failed: {exc}")
 
     def save_channels(self):
         try:
             self.channels_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             tmp = self.channels_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.channels, indent=2))
+            tmp.write_text(json.dumps({**self.channels, "__backoff__": self.backoff}, indent=2))
             tmp.replace(self.channels_path)
         except Exception as exc:
             print(f"failed to save channels: {exc}", flush=True)
@@ -185,35 +191,17 @@ class Bridge:
 
     def send_presence(self, chat_id, presence="composing"):
         try:
-            payload = json.dumps({"session": self.session, "chatId": chat_id, "presence": presence}).encode()
-            request = urllib.request.Request(
-                f"{self.base_url}/api/presence", data=payload, method="POST",
-                headers={
-                    "X-Api-Key": self.api_key,
-                    "Content-Type": "application/json",
-                    "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-                },
-            )
-            with urllib.request.urlopen(request, timeout=3) as resp:
-                pass
-        except Exception:
-            pass
+            self.call("POST", "/message/presence", {"number": self.number_of(chat_id), "presence": presence}, timeout=3)
+        except Exception as exc:
+            self.debug(f"presence failed: {exc}")
 
-    def react(self, message_id, emoji):
+    def react(self, message_id, emoji, chat_id=None):
         if not message_id or not emoji:
             return
         try:
-            payload = json.dumps({"session": self.session, "messageId": message_id, "reaction": emoji}).encode()
-            request = urllib.request.Request(
-                f"{self.base_url}/api/reaction", data=payload, method="PUT",
-                headers={
-                    "X-Api-Key": self.api_key,
-                    "Content-Type": "application/json",
-                    "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-                },
-            )
-            with urllib.request.urlopen(request, timeout=5) as resp:
-                pass
+            self.call("POST", "/message/react", {
+                "number": self.number_of(chat_id or self.operator_id), "messageId": message_id, "emoji": emoji,
+            }, timeout=5)
         except Exception as exc:
             print(f"failed to send reaction: {exc}", flush=True)
 
@@ -221,46 +209,24 @@ class Bridge:
         if not chat_id or not message_id or not text:
             return False
         try:
-            payload = json.dumps({"session": self.session, "text": text[:3800]}).encode()
-            enc_session = urllib.parse.quote(self.session)
-            enc_chat = urllib.parse.quote(chat_id)
-            enc_msg = urllib.parse.quote(message_id)
-            endpoint = f"{self.base_url}/api/{enc_session}/chats/{enc_chat}/messages/{enc_msg}"
-            request = urllib.request.Request(
-                endpoint, data=payload, method="PUT",
-                headers={
-                    "X-Api-Key": self.api_key,
-                    "Content-Type": "application/json",
-                    "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-                },
-            )
-            with urllib.request.urlopen(request, timeout=8) as resp:
-                return True
+            self.call("POST", "/message/edit", {
+                "number": self.number_of(chat_id), "messageId": message_id, "text": text[:3800],
+            }, timeout=8)
+            return True
         except Exception as exc:
             print(f"failed to edit message: {exc}", flush=True)
             return False
 
     def send(self, text, agent_key=None, target_chat=None, skip_typing=False):
         destination = target_chat or self.last_chat_id or self.operator_id
+        if destination.endswith("@g.us"):
+            raise ValueError("group send is not supported by the ZapForge send API")
         if not skip_typing and len(text) > 15:
             self.send_presence(destination, "composing")
             delay = min(1.0, max(0.2, len(text) * 0.002))
             time.sleep(delay)
-        payload = json.dumps({"session": self.session, "chatId": destination, "text": text[:3800]}).encode()
-        request = urllib.request.Request(
-            self.base_url + "/api/sendText", data=payload,
-            headers={
-                "X-Api-Key": self.api_key,
-                "Content-Type": "application/json",
-                "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=12) as response:
-            result = json.load(response)
-        message_id = result.get("id")
-        if isinstance(message_id, dict):
-            message_id = message_id.get("_serialized")
+        result = self.call("POST", "/send/text", {"number": self.number_of(destination), "text": text[:3800]}, timeout=12)
+        message_id = ((result.get("data") or {}).get("Info") or {}).get("ID") or result.get("id")
         if message_id:
             with self.lock:
                 self.seen.add(str(message_id))
@@ -269,114 +235,40 @@ class Bridge:
         return message_id
 
     def create_group(self, name, participants, community_id=None):
-        payload_data = {
-            "session": self.session,
+        data = self.call("POST", "/group/create", {
             "name": name[:100],
-            "participants": participants,
-        }
-        target_comm = community_id or self.community_id
-        if target_comm:
-            payload_data["parentCommunityId"] = target_comm
-            payload_data["communityId"] = target_comm
-        payload = json.dumps(payload_data).encode()
-        request = urllib.request.Request(
-            self.base_url + "/api/createGroup", data=payload,
-            headers={
-                "X-Api-Key": self.api_key,
-                "Content-Type": "application/json",
-                "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=15) as response:
-            return json.load(response)
+            "participants": [self.number_of(p) for p in participants],
+        }, timeout=15).get("data") or {}
+        jid = data.get("JID")
+        if isinstance(jid, dict):
+            jid = f"{jid.get('User')}@{jid.get('Server', 'g.us')}"
+        return {"id": jid, "inviteLink": data.get("inviteLink")}
 
     def link_group_to_community(self, group_id, community_id=None):
-        target_comm = community_id or self.community_id
-        if not target_comm or not group_id:
-            return None
-        payload = json.dumps({
-            "session": self.session,
-            "groupId": group_id,
-            "communityId": target_comm,
-            "description": f"[COMMUNITY_LINK]:{target_comm}",
-        }).encode()
-        request = urllib.request.Request(
-            self.base_url + "/api/linkGroupCommunity", data=payload,
-            headers={
-                "X-Api-Key": self.api_key,
-                "Content-Type": "application/json",
-                "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                return json.load(response)
-        except Exception as exc:
-            print(f"failed to link group {group_id} to community {target_comm}: {exc}", flush=True)
-            return None
+        return None
 
     def set_group_subject(self, group_id, subject):
-        payload = json.dumps({
-            "session": self.session,
-            "groupId": group_id,
-            "subject": subject[:100],
-        }).encode()
-        request = urllib.request.Request(
-            self.base_url + "/api/setGroupSubject", data=payload,
-            headers={
-                "X-Api-Key": self.api_key,
-                "Content-Type": "application/json",
-                "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=20) as response:
-            return json.load(response)
+        return self.call("POST", "/group/subject", {"groupJid": group_id, "name": subject[:100]}, timeout=20)
 
     def archive_chat(self, chat_id, archive=True):
         if not chat_id:
             return False
-        action = "archive" if archive else "unarchive"
-        for ep in (f"/api/{self.session}/chats/{chat_id}/{action}", f"/api/chats/{chat_id}/{action}"):
-            try:
-                payload = json.dumps({"session": self.session, "chatId": chat_id}).encode()
-                req = urllib.request.Request(
-                    self.base_url + ep, data=payload,
-                    headers={
-                        "X-Api-Key": self.api_key,
-                        "Content-Type": "application/json",
-                        "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-                    },
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    return True
-            except Exception:
-                pass
-        return False
+        try:
+            self.call("POST", "/chat/archive" if archive else "/chat/unarchive", {"number": self.number_of(chat_id)})
+            return True
+        except Exception as exc:
+            self.debug(f"archive failed: {exc}")
+            return False
 
     def pin_chat(self, chat_id, pin=True):
         if not chat_id:
             return False
-        for ep in (f"/api/{self.session}/chats/{chat_id}/pin", f"/api/chats/{chat_id}/pin"):
-            try:
-                payload = json.dumps({"session": self.session, "chatId": chat_id}).encode()
-                req = urllib.request.Request(
-                    self.base_url + ep, data=payload,
-                    headers={
-                        "X-Api-Key": self.api_key,
-                        "Content-Type": "application/json",
-                        "User-Agent": "ZapForge-Herdr-Bridge/1.0",
-                    },
-                    method="PUT" if pin else "DELETE",
-                )
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    return True
-            except Exception:
-                pass
-        return False
+        try:
+            self.call("POST", "/chat/pin" if pin else "/chat/unpin", {"number": self.number_of(chat_id)})
+            return True
+        except Exception as exc:
+            self.debug(f"pin failed: {exc}")
+            return False
 
     def record_seen(self, message_id):
         if not message_id or "\n" in message_id or "\r" in message_id:
@@ -536,7 +428,7 @@ class Bridge:
                 else:
                     herdr("agent", "send-keys", pane_id, "Enter")
                     self.send(f"👍 *Confirmado (Enter) no agente `{label_name}`.*", target_chat=incoming_chat)
-                self.react(target_message_id, "✅")
+                self.react(target_message_id, "✅", incoming_chat)
                 self.sync_to_zapforge(incoming_chat, label_name, "operator", f"[Reação {emoji}: Confirmar]")
             except Exception as exc:
                 self.send(f"Erro ao confirmar via reação: {exc}", target_chat=incoming_chat)
@@ -547,7 +439,7 @@ class Bridge:
             try:
                 herdr("agent", "send-keys", pane_id, "C-c", "C-c")
                 self.send(f"🛑 *Execução interrompida via reação no agente `{label_name}`.*", target_chat=incoming_chat)
-                self.react(target_message_id, "🛑")
+                self.react(target_message_id, "🛑", incoming_chat)
                 self.sync_to_zapforge(incoming_chat, label_name, "operator", f"[Reação {emoji}: Abortar]")
             except Exception as exc:
                 self.send(f"Erro ao cancelar via reação: {exc}", target_chat=incoming_chat)
@@ -566,7 +458,7 @@ class Bridge:
                     notice = ""
                 screen_text = f"🖥️ *Terminal ({label_name}):*\n\n```\n{wa_screen}\n```" + notice
                 self.send(screen_text, target_chat=incoming_chat)
-                self.react(target_message_id, "👀")
+                self.react(target_message_id, "👀", incoming_chat)
             except Exception as exc:
                 self.send(f"Erro ao ler tela via reação: {exc}", target_chat=incoming_chat)
             return
@@ -592,7 +484,7 @@ class Bridge:
                         parts.append(f"📊 *Estatísticas:* ```\n{diff_txt[:1200]}\n```")
                     res = "\n\n".join(parts)
                 self.send(res, target_chat=incoming_chat)
-                self.react(target_message_id, "🔍")
+                self.react(target_message_id, "🔍", incoming_chat)
             except Exception as exc:
                 self.send(f"Erro ao obter diff via reação: {exc}", target_chat=incoming_chat)
             return
@@ -784,6 +676,10 @@ class Bridge:
 
         current_panes = {a["pane_id"]: a for a in current}
 
+        if not self.groups:
+            self.reconcile_dm(current_panes)
+            return
+
         # 1. Reconcile live agents (create group or update status)
         for pane_id, agent in current_panes.items():
             st = agent.get("agent_status", "unknown")
@@ -794,7 +690,7 @@ class Bridge:
             with self.lock:
                 ch = self.channels.get(pane_id)
 
-            if not ch and self.sync_channels:
+            if not ch and self.sync_channels and self.backoff_due(pane_id):
                 print(f"auto-creating WhatsApp channel for {pane_id} ({lbl})...", flush=True)
                 try:
                     res = self.create_group(target_subject, [self.operator_id], community_id=self.community_id)
@@ -818,6 +714,7 @@ class Bridge:
                         with self.lock:
                             self.channels[pane_id] = ch
                             self.save_channels()
+                        self.backoff_clear(pane_id)
                         print(f"created WhatsApp channel {group_id} for {lbl} (community: {self.community_id})", flush=True)
 
                         welcome_text = (
@@ -848,7 +745,7 @@ class Bridge:
                             except Exception as ann_err:
                                 print(f"failed to send announcement for {lbl}: {ann_err}", flush=True)
                 except Exception as exc:
-                    print(f"failed to create channel for {lbl}: {exc}", flush=True)
+                    self.backoff_fail(pane_id, lbl, exc)
                     continue
 
             if ch:
@@ -901,8 +798,8 @@ class Bridge:
                                 )
                                 try:
                                     self.send(urgent_alert, target_chat=self.operator_id)
-                                except Exception:
-                                    pass
+                                except Exception as urgent_err:
+                                    self.debug(f"urgent alert failed: {urgent_err}")
                         except Exception as exc:
                             print(f"failed to send blocked alert for {pane_id}: {exc}", flush=True)
 
@@ -953,6 +850,48 @@ class Bridge:
                 with self.lock:
                     self.save_channels()
 
+    def backoff_due(self, pane_id):
+        entry = self.backoff.get(pane_id)
+        return not entry or time.time() >= entry["next_at"]
+
+    def backoff_fail(self, pane_id, lbl, exc):
+        entry = self.backoff.get(pane_id, {"count": 0, "error": ""})
+        count = entry["count"] + 1
+        error = f"{type(exc).__name__}: {exc}"
+        delay = min(3600, 30 * 2 ** (count - 1))
+        if error != entry["error"]:
+            print(f"failed to create channel for {lbl}: {error} (retry in {delay}s)", flush=True)
+        self.backoff[pane_id] = {"count": count, "next_at": time.time() + delay, "error": error}
+        with self.lock:
+            self.save_channels()
+
+    def backoff_clear(self, pane_id):
+        if self.backoff.pop(pane_id, None):
+            print(f"channel creation recovered for {pane_id}", flush=True)
+
+    def reconcile_dm(self, current_panes):
+        for pane_id, agent in current_panes.items():
+            st = agent.get("agent_status", "unknown")
+            prev = self.statuses.get(pane_id)
+            self.statuses[pane_id] = st
+            if prev is None or prev == st or st not in ("blocked", "done"):
+                continue
+            lbl = label(agent)
+            print(f"agent {pane_id} ({lbl}) status: {prev} -> {st}", flush=True)
+            if st == "blocked":
+                text = (
+                    f"🚨 *AÇÃO NECESSÁRIA NO HERDR!*\n\n"
+                    f"🏷️ Agente: *{lbl}*\n"
+                    f"O agente está parado aguardando sua resposta.\n\n"
+                    f"```\n{self.read_terminal(pane_id)[-2500:]}\n```"
+                )
+            else:
+                text = f"🏆 *Tarefa concluída*: {lbl}"
+            try:
+                self.send(text, target_chat=self.operator_id)
+            except Exception as exc:
+                print(f"failed to send {st} alert for {pane_id}: {exc}", flush=True)
+
     def poll(self):
         while True:
             time.sleep(10)
@@ -996,14 +935,33 @@ def serve(bridge, listen):
     ThreadingHTTPServer((host, int(port)), Handler).serve_forever()
 
 
+def load_env_file(path):
+    values = {}
+    try:
+        lines = Path(path).expanduser().read_text().splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            values[k.strip()] = v.strip().strip("\"'")
+    return values
+
+
 def main():
-    names = ("WAHA_URL", "WAHA_API_KEY", "WAHA_SESSION", "WAHA_WEBHOOK_HMAC_KEY", "WHATSAPP_OPERATOR_ID")
+    fallback = load_env_file("~/.config/zap-notify/env")
+    for name in ("ZAPFORGE_URL", "ZAPFORGE_TOKEN", "ZAPFORGE_INSTANCE"):
+        if not os.environ.get(name) and fallback.get(name):
+            os.environ[name] = fallback[name]
+    names = ("ZAPFORGE_URL", "ZAPFORGE_TOKEN", "ZAPFORGE_INSTANCE", "WAHA_WEBHOOK_HMAC_KEY", "WHATSAPP_OPERATOR_ID")
     missing = [name for name in names if not os.environ.get(name)]
     if missing:
         raise SystemExit("Missing: " + ", ".join(missing))
     state = os.environ.get("HERDR_WA_STATE", str(Path.home() / ".config/herdr-waha/seen"))
     allowed_chat = os.environ.get("HERDR_WA_CHAT_ID") or os.environ.get("HERDR_WA_GROUP_ID")
     bridge = Bridge(*(os.environ[name] for name in names), state, allowed_chat=allowed_chat)
+    if not bridge.groups:
+        print("zapforge: group/community send unsupported, channels frozen, notify_target=dm", flush=True)
     agents()
     serve(bridge, os.environ.get("HERDR_WA_LISTEN", "127.0.0.1:8080"))
 

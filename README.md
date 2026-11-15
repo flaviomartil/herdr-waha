@@ -14,9 +14,9 @@ flowchart LR
         Operator["WhatsApp Operator<br/><code>WHATSAPP_OPERATOR_ID</code>"]
     end
 
-    subgraph ZapForgePlatform["ZapForge / WAHA Infrastructure"]
+    subgraph ZapForgePlatform["ZapForge Infrastructure"]
         ZF_Webhook["ZapForge Inbound Dispatcher<br/>• Whitelist Operator Filter<br/>• Suppress Conflicting Bots<br/>• HMAC-SHA512 Signer"]
-        ZF_API["WAHA Outbound API<br/><code>POST /api/sendText</code><br/><code>X-Api-Key</code> Authentication"]
+        ZF_API["ZapForge Outbound API<br/><code>POST /send/text</code>, <code>/message/presence|react|edit</code><br/><code>token</code> + <code>instance</code> headers"]
     end
 
     subgraph LocalHost["Local Host / Herdr Environment"]
@@ -62,7 +62,7 @@ flowchart LR
 
 ## Quick Start with ZapForge
 
-[ZapForge](https://zapforge.com.br) includes built-in support for Herdr WAHA out of the box, with native HMAC-SHA512 request signing, operator whitelisting, and a full WAHA-compatible outbound API (`POST /api/sendText`).
+[ZapForge](https://zapforge.com.br) includes built-in support for Herdr WAHA out of the box, with native HMAC-SHA512 request signing, operator whitelisting, and an outbound API authenticated by `token` and `instance` headers (`POST /send/text`). The `/send/text` endpoint accepts direct-chat numbers only, so group and community channels are frozen by default and alerts go to the operator by DM.
 
 1. In your ZapForge dashboard, navigate to **Canais** &rarr; **Herdr WAHA** (or go to your instance settings &rarr; **Integrações** &rarr; **Herdr WAHA**).
 2. Enter your bridge endpoint URL (e.g. `https://your-tunnel.example.com` or `http://127.0.0.1:8080`).
@@ -91,17 +91,20 @@ Set the bridge's `WAHA_WEBHOOK_HMAC_KEY` to the same secret. WAHA sends `X-Webho
 
 ## Environment Variables
 
+`ZAPFORGE_*` fall back to `~/.config/zap-notify/env` when not set in the environment. Failed channel creation retries with exponential backoff (30s doubling, capped at 1h) persisted in `agent_channels.json`.
+
 Configure these in your environment, systemd service, or container runtime:
 
 | Variable | Description | Example |
 | --- | --- | --- |
-| `WAHA_URL` | Base URL of ZapForge or WAHA | `https://zapforge.com.br` or `https://waha.example.com` |
-| `WAHA_API_KEY` | API Key with permission to send messages | `zf_live_...` or your WAHA API key |
-| `WAHA_SESSION` | Connected WhatsApp session name | `default` |
+| `ZAPFORGE_URL` | Base URL of ZapForge | `https://zapforge.com.br` |
+| `ZAPFORGE_TOKEN` | Account token sent in the `token` header | `mgi_acc_...` |
+| `ZAPFORGE_INSTANCE` | Instance id sent in the `instance` header | `3f2c...` |
 | `WAHA_WEBHOOK_HMAC_KEY` | Shared secret key for HMAC-SHA512 verification | `your-secure-secret-key` |
 | `WHATSAPP_OPERATOR_ID` | Whitelisted operator WhatsApp ID | `5511999999999@c.us` (auto-appends `@c.us` if omitted) |
 | `HERDR_BIN` | Path to the `herdr` CLI binary *(optional)* | `herdr` (default) |
 | `HERDR_WA_LISTEN` | Host and port to listen on *(optional)* | `127.0.0.1:8080` (default) |
+| `HERDR_WA_GROUPS` | Enable per-agent group channels (experimental, `/send/text` cannot post to groups) *(optional)* | `0` (default) |
 | `HERDR_WA_STATE` | File path for deduplication store *(optional)* | `~/.config/herdr-waha/seen` (default) |
 
 Run the bridge:

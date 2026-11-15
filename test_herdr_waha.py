@@ -18,6 +18,7 @@ class BridgeTest(unittest.TestCase):
             "https://waha.example", "api-key", "connected", "hook-key",
             "5511999999999@c.us", Path(self.temp.name) / "seen",
         )
+        self.bridge.channels_path = Path(self.temp.name) / "channels.json"
         self.agent = {
             "pane_id": "pane", "terminal_id": "first", "cwd": "/projects/demo",
             "agent": "codex", "agent_status": "idle",
@@ -65,7 +66,7 @@ class BridgeTest(unittest.TestCase):
             self.assertEqual(text, "Este agente não está mais ativo.")
             call.assert_not_called()
 
-    def test_send_uses_waha_session_and_api_key(self):
+    def test_send_uses_zapforge_headers_and_returns_id(self):
         class Response(io.BytesIO):
             def __enter__(self):
                 return self
@@ -74,15 +75,83 @@ class BridgeTest(unittest.TestCase):
                 self.close()
 
         def open_request(request, timeout):
-            self.assertEqual(request.get_header("X-api-key"), "api-key")
-            self.assertEqual(json.loads(request.data), {
-                "session": "connected", "chatId": "5511999999999@c.us", "text": "hello",
-            })
-            return Response(b'{"id":"outbound"}')
+            self.assertTrue(request.full_url.endswith("/send/text"))
+            self.assertEqual(request.get_header("Token"), "api-key")
+            self.assertEqual(request.get_header("Instance"), "connected")
+            self.assertEqual(json.loads(request.data), {"number": "5511999999999", "text": "hello"})
+            return Response(b'{"message":"success","data":{"Info":{"ID":"outbound"}}}')
 
         with patch("herdr_waha.urllib.request.urlopen", side_effect=open_request):
             self.assertEqual(self.bridge.send("hello", ("pane", "first")), "outbound")
         self.assertEqual(self.bridge.replies["outbound"], ("pane", "first"))
+
+    def test_send_to_group_is_rejected(self):
+        with patch("herdr_waha.urllib.request.urlopen") as call:
+            with self.assertRaises(ValueError):
+                self.bridge.send("hello", target_chat="120363@g.us", skip_typing=True)
+        call.assert_not_called()
+
+    def test_presence_react_edit_use_message_endpoints(self):
+        calls = []
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                self.close()
+
+        def open_request(request, timeout):
+            calls.append((request.get_method(), request.full_url.split("zapforge.test")[1], json.loads(request.data)))
+            return Response(b'{"message":"success"}')
+
+        self.bridge.base_url = "https://zapforge.test"
+        with patch("herdr_waha.urllib.request.urlopen", side_effect=open_request):
+            self.bridge.send_presence("5511999999999@c.us")
+            self.bridge.react("m1", "x", "5511999999999@c.us")
+            self.assertTrue(self.bridge.edit_message("5511999999999@c.us", "m1", "new"))
+        self.assertEqual(calls, [
+            ("POST", "/message/presence", {"number": "5511999999999", "presence": "composing"}),
+            ("POST", "/message/react", {"number": "5511999999999", "messageId": "m1", "emoji": "x"}),
+            ("POST", "/message/edit", {"number": "5511999999999", "messageId": "m1", "text": "new"}),
+        ])
+
+    def test_create_failure_backs_off_and_persists(self):
+        self.bridge.groups = True
+        self.bridge.sync_channels = True
+        clock = [1000.0]
+        with patch("herdr_waha.agents", return_value=[self.agent]), \
+                patch("herdr_waha.time.time", side_effect=lambda: clock[0]), \
+                patch.object(self.bridge, "create_group", side_effect=OSError("boom")) as create:
+            self.bridge.reconcile_channels()
+            self.bridge.reconcile_channels()
+            self.assertEqual(create.call_count, 1)
+            clock[0] += 61
+            self.bridge.reconcile_channels()
+            self.assertEqual(create.call_count, 2)
+            self.assertEqual(self.bridge.backoff["pane"]["count"], 2)
+            self.assertEqual(self.bridge.backoff["pane"]["next_at"], clock[0] + 60)
+            for _ in range(20):
+                clock[0] = self.bridge.backoff["pane"]["next_at"] + 1
+                self.bridge.reconcile_channels()
+            self.assertEqual(self.bridge.backoff["pane"]["next_at"] - clock[0], 3600)
+        saved = json.loads(self.bridge.channels_path.read_text())
+        self.assertIn("pane", saved["__backoff__"])
+    def test_groups_disabled_notifies_operator_by_dm_only(self):
+        self.assertFalse(self.bridge.groups)
+        self.assertEqual(self.bridge.notify_target, "dm")
+        blocked = dict(self.agent, agent_status="blocked")
+        with patch("herdr_waha.agents", side_effect=[[self.agent], [blocked], [blocked]]), \
+                patch.object(self.bridge, "read_terminal", return_value="screen"), \
+                patch.object(self.bridge, "create_group") as create, \
+                patch.object(self.bridge, "send") as send:
+            self.bridge.reconcile_channels()
+            send.assert_not_called()
+            self.bridge.reconcile_channels()
+            self.bridge.reconcile_channels()
+        create.assert_not_called()
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(send.call_args.kwargs["target_chat"], "5511999999999@c.us")
 
     def test_group_chat_operator_and_non_operator(self):
         group_id = "120363028392000000@g.us"
@@ -183,7 +252,7 @@ class BridgeTest(unittest.TestCase):
             self.bridge.handle(event)
             mock_herdr.assert_any_call("agent", "send-keys", "pane", "y", "Enter")
             mock_send.assert_called_once()
-            mock_react.assert_called_once_with("msg_prompt_1", "✅")
+            mock_react.assert_called_once_with("msg_prompt_1", "✅", "120363028392999999@g.us")
 
     def test_reaction_abort(self):
         ch_id = "120363028392999999@g.us"
@@ -203,7 +272,7 @@ class BridgeTest(unittest.TestCase):
             self.bridge.handle(event)
             mock_herdr.assert_any_call("agent", "send-keys", "pane", "C-c", "C-c")
             mock_send.assert_called_once()
-            mock_react.assert_called_once_with("msg_prompt_2", "🛑")
+            mock_react.assert_called_once_with("msg_prompt_2", "🛑", "120363028392999999@g.us")
 
 
 if __name__ == "__main__":
