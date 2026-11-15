@@ -127,7 +127,8 @@ class Bridge:
 
     @staticmethod
     def number_of(chat_id):
-        return str(chat_id).split("@")[0]
+        value = str(chat_id)
+        return value if value.endswith("@g.us") else value.split("@")[0]
 
     def get_admin_groups(self):
         try:
@@ -219,8 +220,8 @@ class Bridge:
 
     def send(self, text, agent_key=None, target_chat=None, skip_typing=False):
         destination = target_chat or self.last_chat_id or self.operator_id
-        if destination.endswith("@g.us"):
-            raise ValueError("group send is not supported by the ZapForge send API")
+        if destination.endswith("@g.us") and not self.groups:
+            raise ValueError("group send needs HERDR_WA_GROUPS=1 and a ZapForge build with group JIDs in /send/text")
         if not skip_typing and len(text) > 15:
             self.send_presence(destination, "composing")
             delay = min(1.0, max(0.2, len(text) * 0.002))

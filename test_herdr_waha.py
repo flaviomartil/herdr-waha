@@ -91,6 +91,40 @@ class BridgeTest(unittest.TestCase):
                 self.bridge.send("hello", target_chat="120363@g.us", skip_typing=True)
         call.assert_not_called()
 
+    def test_send_to_group_uses_full_jid_when_groups_enabled(self):
+        self.bridge.groups = True
+        with patch.object(self.bridge, "call", return_value={"data": {"Info": {"ID": "g1"}}}) as call:
+            self.assertEqual(self.bridge.send("hello", target_chat="120363001@g.us", skip_typing=True), "g1")
+        call.assert_called_once_with("POST", "/send/text", {"number": "120363001@g.us", "text": "hello"}, timeout=12)
+
+    def test_number_of_keeps_group_jid_and_strips_contact_suffix(self):
+        self.assertEqual(herdr_waha.Bridge.number_of("120363001@g.us"), "120363001@g.us")
+        self.assertEqual(herdr_waha.Bridge.number_of("5511999999999@c.us"), "5511999999999")
+
+    def test_create_group_reads_full_jid_from_zapforge(self):
+        with patch.object(self.bridge, "call", return_value={"data": {"JID": {"User": "120363012345678901", "Server": "g.us"}}}):
+            self.assertEqual(self.bridge.create_group("Agente", [self.bridge.operator_id])["id"], "120363012345678901@g.us")
+
+    def test_group_channel_created_and_notified_when_groups_enabled(self):
+        self.bridge.groups = True
+        self.bridge.notify_target = "channels"
+        self.bridge.sync_channels = True
+        blocked = dict(self.agent, agent_status="blocked")
+        with patch("herdr_waha.agents", side_effect=[[self.agent], [blocked]]), \
+                patch.object(self.bridge, "create_group", return_value={"id": "120363001@g.us"}) as create, \
+                patch.object(self.bridge, "send") as send, \
+                patch.object(self.bridge, "archive_chat"), \
+                patch.object(self.bridge, "pin_chat"), \
+                patch.object(self.bridge, "sync_to_zapforge"), \
+                patch.object(self.bridge, "read_terminal", return_value="screen"):
+            self.bridge.reconcile_channels()
+            self.bridge.reconcile_channels()
+        create.assert_called_once()
+        self.assertEqual(self.bridge.channels["pane"]["group_id"], "120363001@g.us")
+        targets = [call.kwargs.get("target_chat") for call in send.call_args_list]
+        self.assertEqual(targets.count("120363001@g.us"), 2)
+        self.assertIn(self.bridge.announce_chat, targets)
+
     def test_presence_react_edit_use_message_endpoints(self):
         calls = []
 

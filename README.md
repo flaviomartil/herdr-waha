@@ -62,7 +62,7 @@ flowchart LR
 
 ## Quick Start with ZapForge
 
-[ZapForge](https://zapforge.com.br) includes built-in support for Herdr WAHA out of the box, with native HMAC-SHA512 request signing, operator whitelisting, and an outbound API authenticated by `token` and `instance` headers (`POST /send/text`). The `/send/text` endpoint accepts direct-chat numbers only, so group and community channels are frozen by default and alerts go to the operator by DM.
+[ZapForge](https://zapforge.com.br) includes built-in support for Herdr WAHA out of the box, with native HMAC-SHA512 request signing, operator whitelisting, and an outbound API authenticated by `token` and `instance` headers (`POST /send/text`). The `/send/text` endpoint accepts direct-chat numbers and group JIDs (`@g.us`). Group and community channels stay off unless `HERDR_WA_GROUPS=1`, and alerts go to the operator by DM.
 
 1. In your ZapForge dashboard, navigate to **Canais** &rarr; **Herdr WAHA** (or go to your instance settings &rarr; **Integrações** &rarr; **Herdr WAHA**).
 2. Enter your bridge endpoint URL (e.g. `https://your-tunnel.example.com` or `http://127.0.0.1:8080`).
@@ -104,7 +104,7 @@ Configure these in your environment, systemd service, or container runtime:
 | `WHATSAPP_OPERATOR_ID` | Whitelisted operator WhatsApp ID | `5511999999999@c.us` (auto-appends `@c.us` if omitted) |
 | `HERDR_BIN` | Path to the `herdr` CLI binary *(optional)* | `herdr` (default) |
 | `HERDR_WA_LISTEN` | Host and port to listen on *(optional)* | `127.0.0.1:8080` (default) |
-| `HERDR_WA_GROUPS` | Enable per-agent group channels (experimental, `/send/text` cannot post to groups) *(optional)* | `0` (default) |
+| `HERDR_WA_GROUPS` | Enable per-agent group channels and community alerts. Requires a ZapForge build that accepts group JIDs in `/send/text` *(optional)* | `0` (default) |
 | `HERDR_WA_STATE` | File path for deduplication store *(optional)* | `~/.config/herdr-waha/seen` (default) |
 
 Run the bridge:
